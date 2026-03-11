@@ -19,11 +19,14 @@ export default function HomeScreen() {
         <View style={styles.actions}>
           <Pressable
             style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
-            onPress={() => router.push('/onboarding-1')}>
+            onPress={() => router.push("/sign-up")}>
             <Text style={styles.primaryButtonText}>Get Started</Text>
           </Pressable>
 
-          <Pressable style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
+          <Pressable
+            style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}
+            onPress={() => router.push("/sign-in")}
+          >
             <Text style={styles.secondaryButtonText}>I already have an account</Text>
           </Pressable>
 

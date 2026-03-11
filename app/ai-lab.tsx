@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -14,19 +14,16 @@ import { useRouter } from "expo-router";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
 import type { RecommendationDraft } from "@/lib/ai-types";
-import { generateNextWorkout, parseWorkoutNote, refineWorkout } from "@/lib/ai-api";
+import {
+  generateNextWorkout,
+  getAiContext,
+  parseWorkoutNote,
+  refineWorkout,
+  saveParsedWorkout,
+} from "@/lib/ai-api";
 
 const starterNote =
   "back squat 3x8 @90kg felt heavy\nbench 4x6 @75kg\nbarbell row 4x10\ncable curls sets tbd";
-
-const starterProfile = {
-  goal: "muscle_gain",
-  level: "intermediate",
-  frequencyPerWeek: 4,
-  sessionDuration: 45,
-  equipment: ["barbell", "dumbbells", "cables", "machines"],
-  splitPreference: "upper_lower",
-};
 
 const starterConstraints = {
   focus: "lower body",
@@ -34,38 +31,97 @@ const starterConstraints = {
   availableMinutes: 45,
 };
 
-const starterRecentWorkouts = [
-  {
-    title: "Push Day",
-    sessionType: "upper",
-    fatigueNote: "chest and triceps very taxed",
-    exercises: [
-      { name: "Bench Press", sets: 4, repMin: 6, repMax: 8, weight: 75 },
-      { name: "Incline Dumbbell Press", sets: 3, repMin: 8, repMax: 10 },
-    ],
-  },
-  {
-    title: "Pull Day",
-    sessionType: "upper",
-    exercises: [
-      { name: "Barbell Row", sets: 4, repMin: 8, repMax: 10 },
-      { name: "Lat Pulldown", sets: 3, repMin: 10, repMax: 12 },
-    ],
-  },
-];
+type LoadingAction = "bootstrap" | "parse" | "save" | "generate" | "refine" | null;
 
 export default function AiLabScreen() {
   const router = useRouter();
   const [rawNote, setRawNote] = useState(starterNote);
   const [refineMessage, setRefineMessage] = useState(
-    "Je veux une séance plus courte, sans squat, et avec plus de machine.",
+    "Je veux une seance plus courte, sans squat, et avec plus de machine.",
   );
-  const [parsedResult, setParsedResult] = useState<string>("");
+  const [parsedResult, setParsedResult] = useState("");
   const [recommendation, setRecommendation] = useState<RecommendationDraft | null>(null);
-  const [recommendationResult, setRecommendationResult] = useState<string>("");
-  const [refineResult, setRefineResult] = useState<string>("");
+  const [recommendationId, setRecommendationId] = useState<string | null>(null);
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [latestWorkoutId, setLatestWorkoutId] = useState<string | null>(null);
+  const [recommendationResult, setRecommendationResult] = useState("");
+  const [refineResult, setRefineResult] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [loadingAction, setLoadingAction] = useState<"parse" | "generate" | "refine" | null>(null);
+  const [contextSummary, setContextSummary] = useState("");
+  const [userProfile, setUserProfile] = useState<unknown>(null);
+  const [recentWorkouts, setRecentWorkouts] = useState<unknown[]>([]);
+  const [loadingAction, setLoadingAction] = useState<LoadingAction>("bootstrap");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadContext() {
+      try {
+        const result = await getAiContext();
+        if (cancelled) return;
+
+        const nextProfile = result.user
+          ? {
+              goal: result.user.goal ?? "muscle_gain",
+              level: result.user.level ?? "intermediate",
+              frequencyPerWeek: result.user.frequencyPerWeek ?? 4,
+              sessionDuration: result.user.sessionDuration ?? 45,
+              equipment: Array.isArray(result.user.equipment) ? result.user.equipment : [],
+              splitPreference: result.user.splitPreference ?? "upper_lower",
+            }
+          : {
+              goal: "muscle_gain",
+              level: "intermediate",
+              frequencyPerWeek: 4,
+              sessionDuration: 45,
+              equipment: [],
+              splitPreference: "upper_lower",
+            };
+
+        setUserProfile(nextProfile);
+        setRecentWorkouts(result.recentWorkouts);
+
+        if (result.latestRecommendation) {
+          setRecommendation(result.latestRecommendation);
+          setRecommendationResult(JSON.stringify(result.latestRecommendation, null, 2));
+        }
+
+        setContextSummary(
+          JSON.stringify(
+            {
+              user: result.user,
+              recentWorkoutCount: result.recentWorkouts.length,
+              latestWorkoutId: result.recentWorkouts[0] && typeof result.recentWorkouts[0] === "object"
+                ? (result.recentWorkouts[0] as { id?: string }).id ?? null
+                : null,
+              latestRecommendationId: result.latestRecommendationId ?? null,
+              latestThreadId: result.latestThreadId ?? null,
+            },
+            null,
+            2,
+          ),
+        );
+
+        setLatestWorkoutId(result.latestWorkoutId ?? null);
+        setRecommendationId(result.latestRecommendationId ?? null);
+        setThreadId(result.latestThreadId ?? null);
+      } catch (nextError) {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : "Failed to load AI context");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingAction(null);
+        }
+      }
+    }
+
+    loadContext();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleParse() {
     setError(null);
@@ -80,17 +136,51 @@ export default function AiLabScreen() {
     }
   }
 
+  async function handleSaveParsedWorkout() {
+    if (!parsedResult) {
+      setError("Parse a workout note before saving it.");
+      return;
+    }
+
+    setError(null);
+    setLoadingAction("save");
+    try {
+      const result = await saveParsedWorkout({
+        rawText: rawNote,
+        parsedWorkout: JSON.parse(parsedResult),
+      });
+      setLatestWorkoutId(result.workoutId);
+      setContextSummary((current) =>
+        `${current}\n${JSON.stringify(
+          {
+            savedWorkoutId: result.workoutId,
+            savedExerciseCount: result.exerciseCount,
+          },
+          null,
+          2,
+        )}`,
+      );
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to save parsed workout");
+    } finally {
+      setLoadingAction(null);
+    }
+  }
+
   async function handleGenerate() {
     setError(null);
     setLoadingAction("generate");
     try {
       const result = await generateNextWorkout({
-        userProfile: starterProfile,
-        recentWorkouts: starterRecentWorkouts,
+        userProfile,
+        recentWorkouts,
         latestWorkout: parsedResult ? JSON.parse(parsedResult) : null,
         constraints: starterConstraints,
+        basedOnWorkoutId: latestWorkoutId ?? undefined,
       });
       setRecommendation(result.recommendation);
+      setRecommendationId(result.recommendationId);
+      setThreadId(result.threadId);
       setRecommendationResult(JSON.stringify(result.recommendation, null, 2));
       setRefineResult("");
     } catch (nextError) {
@@ -106,15 +196,24 @@ export default function AiLabScreen() {
       return;
     }
 
+    if (!recommendationId) {
+      setError("No persisted recommendation found. Generate it again first.");
+      return;
+    }
+
     setError(null);
     setLoadingAction("refine");
     try {
       const result = await refineWorkout({
         currentRecommendation: recommendation,
+        recommendationId,
+        threadId: threadId ?? undefined,
         userMessage: refineMessage,
-        recentWorkouts: starterRecentWorkouts,
+        recentWorkouts,
       });
       setRecommendation(result.refinement.recommendation);
+      setRecommendationId(result.recommendationId);
+      setThreadId(result.threadId);
       setRecommendationResult(JSON.stringify(result.refinement.recommendation, null, 2));
       setRefineResult(JSON.stringify(result.refinement, null, 2));
     } catch (nextError) {
@@ -123,6 +222,8 @@ export default function AiLabScreen() {
       setLoadingAction(null);
     }
   }
+
+  const isBootstrapping = loadingAction === "bootstrap";
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -139,6 +240,22 @@ export default function AiLabScreen() {
           <Text style={styles.subtitle}>
             Parse raw notes, generate the next workout, then refine it with a coaching message.
           </Text>
+
+          <View style={styles.card}>
+            <Text style={styles.cardLabel}>Context</Text>
+            <Text style={styles.helperText}>
+              {isBootstrapping
+                ? "Loading connected user context from Prisma..."
+                : "Using the signed-in user's profile and recent workouts."}
+            </Text>
+            {isBootstrapping ? (
+              <ActivityIndicator color="#11141a" />
+            ) : (
+              <Text selectable style={styles.codeBlock}>
+                {contextSummary}
+              </Text>
+            )}
+          </View>
 
           <View style={styles.card}>
             <Text style={styles.cardLabel}>1. Raw note</Text>
@@ -164,12 +281,26 @@ export default function AiLabScreen() {
                 <Text style={styles.primaryButtonText}>Parse workout note</Text>
               )}
             </Pressable>
+            <Pressable
+              onPress={handleSaveParsedWorkout}
+              disabled={loadingAction !== null || !parsedResult}
+              style={({ pressed }) => [
+                styles.secondaryButton,
+                (pressed || loadingAction === "save" || !parsedResult) && styles.pressed,
+              ]}
+            >
+              {loadingAction === "save" ? (
+                <ActivityIndicator color="#11141a" />
+              ) : (
+                <Text style={styles.secondaryButtonText}>Save parsed workout</Text>
+              )}
+            </Pressable>
           </View>
 
           <View style={styles.card}>
             <Text style={styles.cardLabel}>2. Next workout</Text>
             <Text style={styles.helperText}>
-              Uses starter profile, recent workouts, and the parsed workout if available.
+              Uses the signed-in user profile, stored recent workouts, and the parsed workout if available.
             </Text>
             <Pressable
               onPress={handleGenerate}

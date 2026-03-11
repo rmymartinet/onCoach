@@ -17,6 +17,7 @@ async function postAuth(path: string, payload: AuthPayload): Promise<AuthResult>
   try {
     const response = await fetch(`${getApiBaseUrl()}${path}`, {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },

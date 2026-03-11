@@ -29,6 +29,7 @@ model User {
   accounts         Account[]
   workouts         Workout[]
   recommendations  Recommendation[]
+  coachThreads     CoachThread[]
 }
 
 model Session {
@@ -80,6 +81,9 @@ model Workout {
   cleanedSummary String?
   sessionType    String?
   fatigueNote    String?
+  performedAt    DateTime?
+  parsingStatus  WorkoutParsingStatus @default(DRAFT)
+  parseConfidence Float?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
   user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -92,14 +96,18 @@ model Workout {
 model WorkoutExercise {
   id             String   @id @default(cuid())
   workoutId      String
+  rawLine        String?
   exerciseName   String
   normalizedName String?
   sets           Int?
   reps           Int?
+  repMin         Int?
+  repMax         Int?
   weight         Float?
   unit           String?
   restSeconds    Int?
   notes          String?
+  confidence     Float?
   order          Int
   workout        Workout  @relation(fields: [workoutId], references: [id], onDelete: Cascade)
 
@@ -111,12 +119,96 @@ model Recommendation {
   userId           String
   basedOnWorkoutId String?
   title            String
+  goal             String?
+  status           RecommendationStatus @default(DRAFT)
   explanation      String?
+  coachSummary     String?
+  estimatedDurationMinutes Int?
   workoutJson      Json?
   createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
   user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   basedOnWorkout   Workout?  @relation("RecommendationBaseWorkout", fields: [basedOnWorkoutId], references: [id], onDelete: SetNull)
+  exercises        RecommendationExercise[]
+  thread           CoachThread?
 
   @@index([userId, createdAt])
   @@index([basedOnWorkoutId])
+}
+
+model RecommendationExercise {
+  id                String   @id @default(cuid())
+  recommendationId  String
+  order             Int
+  name              String
+  normalizedName    String?
+  sets              Int
+  repMin            Int
+  repMax            Int
+  restSeconds       Int
+  targetRpe         Float?
+  rir               Float?
+  notes             String?
+  warmup            Boolean  @default(false)
+  exerciseType      String?
+  muscleGroups      Json?
+  equipment         Json?
+  substitutions     Json?
+  recommendation    Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@index([recommendationId, order])
+}
+
+model CoachThread {
+  id               String   @id @default(cuid())
+  userId           String
+  recommendationId String?  @unique
+  title            String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recommendation   Recommendation? @relation(fields: [recommendationId], references: [id], onDelete: SetNull)
+  messages         CoachMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model CoachMessage {
+  id             String   @id @default(cuid())
+  threadId       String
+  role           CoachMessageRole
+  content        String
+  actionType     CoachActionType @default(NONE)
+  actionPayload  Json?
+  createdAt      DateTime @default(now())
+  thread         CoachThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+}
+
+enum WorkoutParsingStatus {
+  DRAFT
+  CONFIRMED
+}
+
+enum RecommendationStatus {
+  DRAFT
+  ACCEPTED
+  EDITED
+  REJECTED
+}
+
+enum CoachMessageRole {
+  SYSTEM
+  USER
+  ASSISTANT
+}
+
+enum CoachActionType {
+  NONE
+  REPLACE_EXERCISE
+  ADJUST_VOLUME
+  ADJUST_REST
+  ADJUST_DURATION
+  REGENERATE_WORKOUT
 }

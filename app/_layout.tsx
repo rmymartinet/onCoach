@@ -43,6 +43,7 @@ export default function RootLayout() {
         <Stack.Screen name="how-to-send-note-2" options={{ headerShown: false }} />
         <Stack.Screen name="how-to-send-note-3" options={{ headerShown: false }} />
         <Stack.Screen name="home" options={{ headerShown: false }} />
+        <Stack.Screen name="ai-lab" options={{ headerShown: false }} />
         <Stack.Screen name="stats-detail" options={{ headerShown: false }} />
         <Stack.Screen name="add-workout" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />

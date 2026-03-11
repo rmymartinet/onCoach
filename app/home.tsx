@@ -1,5 +1,5 @@
 import { useRouter } from "expo-router";
-import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import { Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
@@ -9,7 +9,8 @@ export default function HomeScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
+      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+        <View style={styles.container}>
         <View style={styles.headerRow}>
           <View>
             <Text style={styles.dayText}>Wednesday</Text>
@@ -112,12 +113,22 @@ export default function HomeScreen() {
         </View>
 
         <Pressable
+          style={({ pressed }) => [styles.labButton, pressed && styles.pressed]}
+          onPress={() => router.push("/ai-lab")}
+        >
+          <Text style={styles.labEyebrow}>AI TESTING</Text>
+          <Text style={styles.labTitle}>Open the workout lab</Text>
+          <Text style={styles.labBody}>Parse notes, generate the next session, and refine it live.</Text>
+        </Pressable>
+
+        <Pressable
           style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
           onPress={() => router.push("/add-workout")}
         >
           <Text style={styles.addButtonText}>+ Add workout</Text>
         </Pressable>
-      </View>
+        </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -127,9 +138,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#f2f2f2",
   },
+  scrollContent: {
+    padding: 16,
+  },
   container: {
-    flex: 1,
-    margin: 16,
     borderRadius: 36,
     backgroundColor: "#f9f9f9",
     borderWidth: 1,
@@ -392,6 +404,34 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: "#e0e1e4",
+  },
+  labButton: {
+    marginTop: 20,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#dddccf",
+    backgroundColor: "#f3f0e7",
+    paddingHorizontal: 16,
+    paddingVertical: 15,
+  },
+  labEyebrow: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#989177",
+    letterSpacing: 1,
+  },
+  labTitle: {
+    marginTop: 6,
+    fontFamily: Fonts.sans,
+    ...Typography.button,
+    color: "#191d23",
+    fontWeight: "700",
+  },
+  labBody: {
+    marginTop: 4,
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#666d75",
   },
   addButton: {
     marginTop: 28,

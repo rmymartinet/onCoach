@@ -44,12 +44,12 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    margin: 16,
-    borderRadius: 36,
+    margin: 14,
+    borderRadius: 32,
     backgroundColor: '#f9f9f9',
-    paddingHorizontal: 24,
-    paddingTop: 48,
-    paddingBottom: 36,
+    paddingHorizontal: 18,
+    paddingTop: 42,
+    paddingBottom: 30,
     justifyContent: 'space-between',
     borderWidth: 1,
     borderColor: '#e8e8e8',
@@ -58,8 +58,8 @@ const styles = StyleSheet.create({
     fontSize: 44,
   },
   headingBlock: {
-    marginTop: 12,
-    gap: 12,
+    marginTop: 10,
+    gap: 10,
   },
   title: {
     fontSize: 46,
@@ -71,15 +71,15 @@ const styles = StyleSheet.create({
   subtitle: {
     color: '#5f6368',
     fontSize: 29,
-    lineHeight: 40,
+    lineHeight: 38,
     maxWidth: 360,
     fontFamily: Fonts.sans,
   },
   actions: {
-    gap: 14,
+    gap: 12,
   },
   primaryButton: {
-    height: 56,
+    height: 52,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
@@ -92,7 +92,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   secondaryButton: {
-    height: 56,
+    height: 52,
     borderRadius: 14,
     alignItems: 'center',
     justifyContent: 'center',
@@ -107,7 +107,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   footnote: {
-    marginTop: 8,
+    marginTop: 6,
     textAlign: 'center',
     fontSize: 14,
     color: '#9ca1a8',

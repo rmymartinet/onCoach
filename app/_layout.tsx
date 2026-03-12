@@ -46,6 +46,7 @@ export default function RootLayout() {
           <Stack.Screen name="how-to-send-note-3" options={{ headerShown: false }} />
           <Stack.Screen name="home" options={{ headerShown: false }} />
           <Stack.Screen name="stats-detail" options={{ headerShown: false }} />
+          <Stack.Screen name="workout-detail" options={{ headerShown: false }} />
           <Stack.Screen name="add-workout" options={{ headerShown: false }} />
           <Stack.Screen name="import-note" options={{ headerShown: false }} />
           <Stack.Screen name="paste-workout" options={{ headerShown: false }} />

@@ -1,6 +1,7 @@
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
+import { FloatingNav } from "@/components/floating-nav";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
 
@@ -58,6 +59,7 @@ export default function WorkoutDetailScreen() {
           </View>
         </View>
       </View>
+      <FloatingNav active="stats" />
     </SafeAreaView>
   );
 }
@@ -76,7 +78,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#f9f9f9",
     paddingHorizontal: 16,
     paddingTop: 18,
-    paddingBottom: 20,
+    paddingBottom: 108,
   },
   headerRow: {
     position: "relative",

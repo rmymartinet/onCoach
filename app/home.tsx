@@ -13,6 +13,7 @@ import {
 
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
+import { FloatingNav } from "@/components/floating-nav";
 
 const currentVolumeTrend = [38, 46, 44, 58, 55, 61, 52];
 const previousVolumeTrend = [26, 34, 22, 28, 24, 31, 21];
@@ -481,6 +482,7 @@ export default function HomeScreen() {
           </Pressable>
         </View>
       </ScrollView>
+      <FloatingNav active="home" />
     </SafeAreaView>
   );
 }
@@ -492,6 +494,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: 12,
+    paddingBottom: 120,
   },
   container: {
     borderRadius: 30,

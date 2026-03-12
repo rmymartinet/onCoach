@@ -85,7 +85,10 @@ export default function HomeScreen() {
           <Text style={styles.recoTitle}>Lower Body</Text>
           <Text style={styles.recoBody}>4 days since last leg session. You&apos;re ready.</Text>
 
-          <Pressable style={({ pressed }) => [styles.startButton, pressed && styles.pressed]}>
+          <Pressable
+            style={({ pressed }) => [styles.startButton, pressed && styles.pressed]}
+            onPress={() => router.push("/add-workout")}
+          >
             <Text style={styles.startButtonText}>Start this workout</Text>
           </Pressable>
         </View>
@@ -111,15 +114,6 @@ export default function HomeScreen() {
             <Text style={styles.sessionDate}>Nov 12</Text>
           </View>
         </View>
-
-        <Pressable
-          style={({ pressed }) => [styles.labButton, pressed && styles.pressed]}
-          onPress={() => router.push("/ai-lab")}
-        >
-          <Text style={styles.labEyebrow}>AI TESTING</Text>
-          <Text style={styles.labTitle}>Open the workout lab</Text>
-          <Text style={styles.labBody}>Parse notes, generate the next session, and refine it live.</Text>
-        </Pressable>
 
         <Pressable
           style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
@@ -404,34 +398,6 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: "#e0e1e4",
-  },
-  labButton: {
-    marginTop: 20,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#dddccf",
-    backgroundColor: "#f3f0e7",
-    paddingHorizontal: 16,
-    paddingVertical: 15,
-  },
-  labEyebrow: {
-    fontFamily: Fonts.sans,
-    ...Typography.caption,
-    color: "#989177",
-    letterSpacing: 1,
-  },
-  labTitle: {
-    marginTop: 6,
-    fontFamily: Fonts.sans,
-    ...Typography.button,
-    color: "#191d23",
-    fontWeight: "700",
-  },
-  labBody: {
-    marginTop: 4,
-    fontFamily: Fonts.sans,
-    ...Typography.bodySmall,
-    color: "#666d75",
   },
   addButton: {
     marginTop: 28,

@@ -3,6 +3,7 @@ import { Stack } from 'expo-router';
 import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import {
   Inter_400Regular,
   Inter_500Medium,
@@ -30,25 +31,29 @@ export default function RootLayout() {
   }
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="sign-up" options={{ headerShown: false }} />
-        <Stack.Screen name="sign-in" options={{ headerShown: false }} />
-        <Stack.Screen name="onboarding-1" options={{ headerShown: false }} />
-        <Stack.Screen name="onboarding-2" options={{ headerShown: false }} />
-        <Stack.Screen name="onboarding-3" options={{ headerShown: false }} />
-        <Stack.Screen name="quick-profile" options={{ headerShown: false }} />
-        <Stack.Screen name="how-to-send-note" options={{ headerShown: false }} />
-        <Stack.Screen name="how-to-send-note-2" options={{ headerShown: false }} />
-        <Stack.Screen name="how-to-send-note-3" options={{ headerShown: false }} />
-        <Stack.Screen name="home" options={{ headerShown: false }} />
-        <Stack.Screen name="ai-lab" options={{ headerShown: false }} />
-        <Stack.Screen name="stats-detail" options={{ headerShown: false }} />
-        <Stack.Screen name="add-workout" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-      </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+        <Stack>
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="sign-up" options={{ headerShown: false }} />
+          <Stack.Screen name="sign-in" options={{ headerShown: false }} />
+          <Stack.Screen name="onboarding-1" options={{ headerShown: false }} />
+          <Stack.Screen name="onboarding-2" options={{ headerShown: false }} />
+          <Stack.Screen name="onboarding-3" options={{ headerShown: false }} />
+          <Stack.Screen name="quick-profile" options={{ headerShown: false }} />
+          <Stack.Screen name="how-to-send-note" options={{ headerShown: false }} />
+          <Stack.Screen name="how-to-send-note-2" options={{ headerShown: false }} />
+          <Stack.Screen name="how-to-send-note-3" options={{ headerShown: false }} />
+          <Stack.Screen name="home" options={{ headerShown: false }} />
+          <Stack.Screen name="stats-detail" options={{ headerShown: false }} />
+          <Stack.Screen name="add-workout" options={{ headerShown: false }} />
+          <Stack.Screen name="import-note" options={{ headerShown: false }} />
+          <Stack.Screen name="paste-workout" options={{ headerShown: false }} />
+          <Stack.Screen name="manual-workout" options={{ headerShown: false }} />
+          <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        </Stack>
+        <StatusBar style="auto" />
+      </ThemeProvider>
+    </GestureHandlerRootView>
   );
 }

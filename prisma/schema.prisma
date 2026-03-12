@@ -30,6 +30,7 @@ model User {
   workouts         Workout[]
   recommendations  Recommendation[]
   coachThreads     CoachThread[]
+  noteImports      NoteImport[]
 }
 
 model Session {
@@ -89,6 +90,7 @@ model Workout {
   user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   exercises      WorkoutExercise[]
   recommendations Recommendation[] @relation("RecommendationBaseWorkout")
+  matchedCandidates NoteWorkoutCandidate[]
 
   @@index([userId, createdAt])
 }
@@ -186,6 +188,45 @@ model CoachMessage {
   @@index([threadId, createdAt])
 }
 
+model NoteImport {
+  id             String              @id @default(cuid())
+  userId         String
+  source         NoteImportSource    @default(APPLE_NOTES_SHARE)
+  rawText        String
+  normalizedText String?
+  contentHash    String
+  status         NoteImportStatus    @default(RECEIVED)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  user           User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  candidates     NoteWorkoutCandidate[]
+
+  @@index([userId, createdAt])
+  @@index([userId, contentHash])
+}
+
+model NoteWorkoutCandidate {
+  id               String                    @id @default(cuid())
+  noteImportId     String
+  title            String?
+  rawExcerpt       String
+  performedAt      DateTime?
+  confidence       Float?
+  isMostRecent     Boolean                   @default(false)
+  dedupeStatus     NoteCandidateDedupeStatus @default(PENDING)
+  dedupeReason     String?
+  fingerprint      String?
+  parsingStatus    WorkoutParsingStatus      @default(DRAFT)
+  matchedWorkoutId String?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+  noteImport       NoteImport                @relation(fields: [noteImportId], references: [id], onDelete: Cascade)
+  matchedWorkout   Workout?                  @relation(fields: [matchedWorkoutId], references: [id], onDelete: SetNull)
+
+  @@index([noteImportId, createdAt])
+  @@index([matchedWorkoutId])
+}
+
 enum WorkoutParsingStatus {
   DRAFT
   CONFIRMED
@@ -211,4 +252,23 @@ enum CoachActionType {
   ADJUST_REST
   ADJUST_DURATION
   REGENERATE_WORKOUT
+}
+
+enum NoteImportSource {
+  APPLE_NOTES_SHARE
+  MANUAL_PASTE
+}
+
+enum NoteImportStatus {
+  RECEIVED
+  SEGMENTED
+  REVIEW_REQUIRED
+  COMPLETED
+}
+
+enum NoteCandidateDedupeStatus {
+  PENDING
+  NEW
+  POSSIBLE_DUPLICATE
+  DUPLICATE
 }

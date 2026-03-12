@@ -1,4 +1,4 @@
-import type { RecommendationDraft } from "@/lib/ai-types";
+import type { NoteImportSegmentation, ParsedWorkoutCollection, RecommendationDraft } from "@/lib/ai-types";
 
 function getApiBaseUrl() {
   return process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8081";
@@ -108,4 +108,35 @@ export function getAiContext() {
     latestRecommendationId: string | null;
     latestThreadId: string | null;
   }>("/api/ai/context");
+}
+
+export function importNote(payload: {
+  rawText: string;
+  source?: "APPLE_NOTES_SHARE" | "MANUAL_PASTE";
+}) {
+  return postJson<{
+    ok: true;
+    model: string;
+    noteImportId: string;
+    summary?: NoteImportSegmentation["summary"];
+    candidates: Array<{
+      id: string;
+      title: string | null;
+      rawExcerpt: string;
+      performedAt: string | null;
+      confidence?: number | null;
+      isMostRecent: boolean;
+      dedupeStatus: "PENDING" | "NEW" | "POSSIBLE_DUPLICATE" | "DUPLICATE";
+      dedupeReason: string | null;
+      matchedWorkoutId: string | null;
+    }>;
+  }>("/api/ai/import-note", payload);
+}
+
+export function parseNoteDirect(rawText: string) {
+  return postJson<{
+    ok: true;
+    model: string;
+    parsedCollection: ParsedWorkoutCollection;
+  }>("/api/ai/parse-note-direct", { rawText });
 }

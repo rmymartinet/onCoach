@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
+
 import { prisma } from "@/lib/prisma";
-import type { ParsedWorkout, RecommendationDraft } from "@/lib/ai-types";
+import type {
+  NoteImportSegmentation,
+  NoteWorkoutCandidate,
+  ParsedWorkout,
+  RecommendationDraft,
+} from "@/lib/ai-types";
 
 function serializeRecommendation(recommendation: RecommendationDraft) {
   return {
@@ -10,6 +17,22 @@ function serializeRecommendation(recommendation: RecommendationDraft) {
     estimatedDurationMinutes: recommendation.estimatedDurationMinutes,
     exercises: recommendation.exercises,
   };
+}
+
+function normalizeFreeText(value: string) {
+  return value.replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function hashText(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function fingerprintCandidate(candidate: NoteWorkoutCandidate) {
+  if (candidate.fingerprint) {
+    return candidate.fingerprint;
+  }
+
+  return hashText(normalizeFreeText(candidate.rawExcerpt)).slice(0, 24);
 }
 
 function toCoachActionType(actionType: string | undefined) {
@@ -256,4 +279,86 @@ export async function saveRecommendationRefinement(params: {
   });
 
   return ensuredThread;
+}
+
+export async function createNoteImportRecord(params: {
+  userId: string;
+  rawText: string;
+  source?: "APPLE_NOTES_SHARE" | "MANUAL_PASTE";
+  segmentation: NoteImportSegmentation;
+}) {
+  const { userId, rawText, source = "APPLE_NOTES_SHARE", segmentation } = params;
+  const normalizedText = normalizeFreeText(rawText);
+  const contentHash = hashText(normalizedText);
+
+  const noteImport = await prisma.noteImport.create({
+    data: {
+      userId,
+      rawText,
+      normalizedText,
+      contentHash,
+      source,
+      status: segmentation.candidates.length > 1 ? "REVIEW_REQUIRED" : "SEGMENTED",
+    },
+  });
+
+  const recentWorkouts = await prisma.workout.findMany({
+    where: { userId },
+    select: {
+      id: true,
+      rawText: true,
+      performedAt: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 20,
+  });
+
+  const persistedCandidates = [];
+  for (const candidate of segmentation.candidates) {
+    const candidateFingerprint = fingerprintCandidate(candidate);
+    const duplicateMatch = recentWorkouts.find((workout) => {
+      const rawMatch =
+        hashText(normalizeFreeText(workout.rawText)).slice(0, 24) === candidateFingerprint;
+
+      const dateMatch =
+        candidate.performedAt &&
+        workout.performedAt &&
+        new Date(candidate.performedAt).toDateString() === workout.performedAt.toDateString();
+
+      return rawMatch || Boolean(dateMatch);
+    });
+
+    const dedupeStatus = duplicateMatch
+      ? ("DUPLICATE" as const)
+      : candidate.confidence !== undefined && candidate.confidence < 0.65
+        ? ("POSSIBLE_DUPLICATE" as const)
+        : ("NEW" as const);
+
+    persistedCandidates.push(
+      await prisma.noteWorkoutCandidate.create({
+        data: {
+          noteImportId: noteImport.id,
+          title: candidate.title,
+          rawExcerpt: candidate.rawExcerpt,
+          performedAt: candidate.performedAt ? new Date(candidate.performedAt) : undefined,
+          confidence: candidate.confidence,
+          isMostRecent: candidate.isMostRecent ?? false,
+          dedupeStatus,
+          dedupeReason: duplicateMatch
+            ? "Matched an existing workout by content or date"
+            : dedupeStatus === "POSSIBLE_DUPLICATE"
+              ? "Low confidence candidate, review before import"
+              : undefined,
+          fingerprint: candidateFingerprint,
+          matchedWorkoutId: duplicateMatch?.id,
+        },
+      }),
+    );
+  }
+
+  return {
+    noteImport,
+    candidates: persistedCandidates,
+  };
 }

@@ -64,3 +64,22 @@ export type RefineWorkoutResponse = {
   action: CoachAction;
   recommendation: RecommendationDraft;
 };
+
+export type NoteWorkoutCandidate = {
+  title?: string;
+  rawExcerpt: string;
+  performedAt?: string;
+  confidence?: number;
+  isMostRecent?: boolean;
+  fingerprint?: string;
+};
+
+export type NoteImportSegmentation = {
+  summary?: string;
+  candidates: NoteWorkoutCandidate[];
+};
+
+export type ParsedWorkoutCollection = {
+  summary?: string;
+  sessions: ParsedWorkout[];
+};

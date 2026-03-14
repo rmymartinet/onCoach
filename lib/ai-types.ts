@@ -51,6 +51,30 @@ export type RecommendationDraft = {
   exercises: RecommendationExerciseDraft[];
 };
 
+export type TrainingPlanDay = {
+  dayLabel: string;
+  title: string;
+  summary?: string;
+  estimatedDurationMinutes?: number;
+  exercises: RecommendationExerciseDraft[];
+};
+
+export type TrainingPlanWeek = {
+  weekNumber: number;
+  title: string;
+  summary?: string;
+  days: TrainingPlanDay[];
+};
+
+export type TrainingPlanDraft = {
+  blockTitle: string;
+  goal?: string;
+  summary?: string;
+  split?: string;
+  progressionNotes?: string[];
+  weeks: TrainingPlanWeek[];
+};
+
 export type CoachAction =
   | { type: "none" }
   | { type: "replace_exercise"; targetExercise: string; replacement: RecommendationExerciseDraft }

@@ -6,6 +6,7 @@ import type {
   NoteWorkoutCandidate,
   ParsedWorkout,
   RecommendationDraft,
+  TrainingPlanDraft,
 } from "@/lib/ai-types";
 
 function serializeRecommendation(recommendation: RecommendationDraft) {
@@ -16,6 +17,17 @@ function serializeRecommendation(recommendation: RecommendationDraft) {
     explanation: recommendation.explanation,
     estimatedDurationMinutes: recommendation.estimatedDurationMinutes,
     exercises: recommendation.exercises,
+  };
+}
+
+function serializeTrainingPlan(plan: TrainingPlanDraft) {
+  return {
+    blockTitle: plan.blockTitle,
+    goal: plan.goal,
+    summary: plan.summary,
+    split: plan.split,
+    progressionNotes: plan.progressionNotes ?? [],
+    weeks: plan.weeks,
   };
 }
 
@@ -62,6 +74,7 @@ export async function saveParsedWorkout(params: {
   const workout = await prisma.workout.create({
     data: {
       userId,
+      title: parsedWorkout.title,
       rawText,
       cleanedSummary: parsedWorkout.cleanedSummary,
       sessionType: parsedWorkout.sessionType,
@@ -168,6 +181,107 @@ export async function createRecommendationRecord(params: {
       },
     }),
     thread,
+  };
+}
+
+export async function createTrainingPlanRecord(params: {
+  userId: string;
+  trainingPlan: TrainingPlanDraft;
+  source?: "AI_GENERATED" | "IMPORTED" | "MANUAL";
+}) {
+  const { userId, trainingPlan, source = "AI_GENERATED" } = params;
+
+  const createdPlan = await prisma.trainingPlan.create({
+    data: {
+      userId,
+      title: trainingPlan.blockTitle,
+      goal: trainingPlan.goal,
+      summary: trainingPlan.summary,
+      split: trainingPlan.split,
+      progressionNotes: trainingPlan.progressionNotes ?? [],
+      status: "DRAFT",
+      source,
+      level: null,
+    },
+  });
+
+  for (const week of trainingPlan.weeks) {
+    const createdWeek = await prisma.trainingWeek.create({
+      data: {
+        planId: createdPlan.id,
+        weekNumber: week.weekNumber,
+        title: week.title,
+        summary: week.summary,
+      },
+    });
+
+    for (const [dayIndex, day] of week.days.entries()) {
+      const createdDay = await prisma.trainingDay.create({
+        data: {
+          weekId: createdWeek.id,
+          order: dayIndex,
+          dayLabel: day.dayLabel,
+          title: day.title,
+          summary: day.summary,
+          estimatedDurationMinutes: day.estimatedDurationMinutes,
+        },
+      });
+
+      for (const exercise of day.exercises) {
+        await prisma.trainingDayExercise.create({
+          data: {
+            dayId: createdDay.id,
+            order: exercise.order,
+            name: exercise.name,
+            normalizedName: exercise.normalizedName,
+            sets: exercise.sets,
+            repMin: exercise.repMin,
+            repMax: exercise.repMax,
+            restSeconds: exercise.restSeconds,
+            targetRpe: exercise.targetRpe,
+            rir: exercise.rir,
+            notes: exercise.notes,
+            warmup: exercise.warmup ?? false,
+            exerciseType: exercise.exerciseType,
+            muscleGroups: exercise.muscleGroups ?? [],
+            equipment: exercise.equipment ?? [],
+            substitutions: exercise.substitutions ?? [],
+          },
+        });
+      }
+    }
+  }
+
+  const thread = await prisma.planThread.create({
+    data: {
+      userId,
+      planId: createdPlan.id,
+      scope: "PLAN",
+      title: createdPlan.title,
+    },
+  });
+
+  return {
+    trainingPlan: await prisma.trainingPlan.findUniqueOrThrow({
+      where: { id: createdPlan.id },
+      include: {
+        weeks: {
+          orderBy: { weekNumber: "asc" },
+          include: {
+            days: {
+              orderBy: { order: "asc" },
+              include: {
+                exercises: {
+                  orderBy: { order: "asc" },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    thread,
+    serialized: serializeTrainingPlan(trainingPlan),
   };
 }
 

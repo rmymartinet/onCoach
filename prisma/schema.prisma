@@ -23,6 +23,19 @@ model User {
   sessionDuration  Int?
   equipment        Json?
   splitPreference  String?
+  heightCm         Int?
+  weightKg         Float?
+  experienceYears  Float?
+  trainingLocation String?
+  preferredStyles  Json?
+  favoriteExercises Json?
+  avoidedExercises Json?
+  priorityMuscles  Json?
+  limitations      Json?
+  jobActivityLevel String?
+  preferredTrainingTimes Json?
+  availableDays    Json?
+  onboardingCompletedAt DateTime?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
   sessions         Session[]
@@ -30,7 +43,10 @@ model User {
   workouts         Workout[]
   recommendations  Recommendation[]
   coachThreads     CoachThread[]
+  planThreads      PlanThread[]
   noteImports      NoteImport[]
+  readinessChecks  ReadinessCheck[]
+  trainingPlans    TrainingPlan[]
 }
 
 model Session {
@@ -78,6 +94,7 @@ model Verification {
 model Workout {
   id             String            @id @default(cuid())
   userId         String
+  title          String?
   rawText        String
   cleanedSummary String?
   sessionType    String?
@@ -227,6 +244,129 @@ model NoteWorkoutCandidate {
   @@index([matchedWorkoutId])
 }
 
+model ReadinessCheck {
+  id                   String   @id @default(cuid())
+  userId               String
+  energy               Int?
+  sleepQuality         Int?
+  stress               Int?
+  painLevel            Int?
+  timeAvailableMinutes Int?
+  focusToday           String?
+  notes                String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model TrainingPlan {
+  id               String              @id @default(cuid())
+  userId           String
+  title            String
+  goal             String?
+  level            String?
+  summary          String?
+  split            String?
+  status           TrainingPlanStatus  @default(DRAFT)
+  progressionNotes Json?
+  source           TrainingPlanSource  @default(AI_GENERATED)
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+  user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weeks            TrainingWeek[]
+  threads          PlanThread[]
+
+  @@index([userId, createdAt])
+}
+
+model TrainingWeek {
+  id         String        @id @default(cuid())
+  planId     String
+  weekNumber Int
+  title      String
+  summary    String?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  plan       TrainingPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  days       TrainingDay[]
+
+  @@index([planId, weekNumber])
+}
+
+model TrainingDay {
+  id                       String               @id @default(cuid())
+  weekId                   String
+  order                    Int
+  dayLabel                 String
+  title                    String
+  summary                  String?
+  estimatedDurationMinutes Int?
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+  week                     TrainingWeek         @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  exercises                TrainingDayExercise[]
+  threads                  PlanThread[]
+
+  @@index([weekId, order])
+}
+
+model TrainingDayExercise {
+  id             String      @id @default(cuid())
+  dayId          String
+  order          Int
+  name           String
+  normalizedName String?
+  sets           Int
+  repMin         Int
+  repMax         Int
+  restSeconds    Int
+  targetRpe      Float?
+  rir            Float?
+  notes          String?
+  warmup         Boolean     @default(false)
+  exerciseType   String?
+  muscleGroups   Json?
+  equipment      Json?
+  substitutions  Json?
+  day            TrainingDay @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@index([dayId, order])
+}
+
+model PlanThread {
+  id        String          @id @default(cuid())
+  userId    String
+  planId    String?
+  dayId     String?
+  scope     PlanThreadScope @default(PLAN)
+  title     String?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan      TrainingPlan?   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  day       TrainingDay?    @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  messages  PlanMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([planId])
+  @@index([dayId])
+}
+
+model PlanMessage {
+  id            String         @id @default(cuid())
+  threadId      String
+  role          CoachMessageRole
+  content       String
+  actionType    PlanActionType @default(NONE)
+  actionPayload Json?
+  createdAt     DateTime       @default(now())
+  thread        PlanThread     @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+}
+
 enum WorkoutParsingStatus {
   DRAFT
   CONFIRMED
@@ -257,6 +397,37 @@ enum CoachActionType {
 enum NoteImportSource {
   APPLE_NOTES_SHARE
   MANUAL_PASTE
+}
+
+enum TrainingPlanStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+enum TrainingPlanSource {
+  AI_GENERATED
+  IMPORTED
+  MANUAL
+}
+
+enum PlanThreadScope {
+  PLAN
+  WEEK
+  DAY
+}
+
+enum PlanActionType {
+  NONE
+  EXPLAIN_DAY
+  REPLACE_EXERCISE
+  ADJUST_DURATION
+  ADJUST_INTENSITY
+  ADJUST_VOLUME
+  REGENERATE_DAY
+  REGENERATE_WEEK
+  REGENERATE_PLAN
 }
 
 enum NoteImportStatus {

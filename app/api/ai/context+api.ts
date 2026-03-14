@@ -20,13 +20,26 @@ export async function GET(request: Request) {
       sessionDuration: true,
       equipment: true,
       splitPreference: true,
+      heightCm: true,
+      weightKg: true,
+      experienceYears: true,
+      trainingLocation: true,
+      preferredStyles: true,
+      favoriteExercises: true,
+      avoidedExercises: true,
+      priorityMuscles: true,
+      limitations: true,
+      jobActivityLevel: true,
+      preferredTrainingTimes: true,
+      availableDays: true,
+      onboardingCompletedAt: true,
     },
   });
 
   const recentWorkouts = await prisma.workout.findMany({
     where: { userId: session.user.id },
     orderBy: [{ performedAt: "desc" }, { createdAt: "desc" }],
-    take: 5,
+    take: 30,
     include: {
       exercises: {
         orderBy: { order: "asc" },
@@ -55,7 +68,7 @@ export async function GET(request: Request) {
     latestWorkoutId: recentWorkouts[0]?.id ?? null,
     recentWorkouts: recentWorkouts.map((workout) => ({
       id: workout.id,
-      title: workout.cleanedSummary ?? workout.sessionType ?? "Workout",
+      title: workout.title ?? workout.cleanedSummary ?? workout.sessionType ?? "Workout",
       rawText: workout.rawText,
       cleanedSummary: workout.cleanedSummary,
       sessionType: workout.sessionType,
@@ -63,6 +76,7 @@ export async function GET(request: Request) {
       performedAt: workout.performedAt,
       createdAt: workout.createdAt,
       exercises: workout.exercises.map((exercise) => ({
+        id: exercise.id,
         name: exercise.exerciseName,
         normalizedName: exercise.normalizedName,
         sets: exercise.sets,

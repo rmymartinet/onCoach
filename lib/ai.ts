@@ -2,12 +2,15 @@ import type {
   CoachAction,
   NoteImportSegmentation,
   NoteWorkoutCandidate,
-  ParsedWorkoutCollection,
   ParsedWorkout,
+  ParsedWorkoutCollection,
   ParsedWorkoutExercise,
   RecommendationDraft,
   RecommendationExerciseDraft,
   RefineWorkoutResponse,
+  TrainingPlanDay,
+  TrainingPlanDraft,
+  TrainingPlanWeek,
 } from "@/lib/ai-types";
 
 type ParseWorkoutResult = {
@@ -17,6 +20,11 @@ type ParseWorkoutResult = {
 
 type RecommendationResult = {
   recommendation: RecommendationDraft;
+  model: string;
+};
+
+type TrainingPlanResult = {
+  trainingPlan: TrainingPlanDraft;
   model: string;
 };
 
@@ -36,19 +44,78 @@ type ParseWorkoutCollectionResult = {
 };
 
 function asOptionalString(value: unknown) {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
 }
 
 function asOptionalNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function normalizeMultilineText(value: string) {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
-const sectionHeadingPatterns: Array<{ label: string; pattern: RegExp }> = [
-  { label: "Lower Body", pattern: /^(jambes?|legs?|leg day|lower body|bas du corps)$/i },
+function inferTargetAreaFromText(value: string) {
+  const raw = value.toLowerCase();
+
+  if (
+    /(presse|leg press|squat|quad|glute|calf|ham|ischio|leg extension|leg curl|hack|fente|lunge|mollet|adductor|abductor)/.test(
+      raw,
+    )
+  ) {
+    return "Lower";
+  }
+  if (/(bench|chest|fly|pec|dip|push-up|push up)/.test(raw)) {
+    return "Push";
+  }
+  if (/(row|pull|lat|pulldown|tirage|back|trap)/.test(raw)) {
+    return "Pull";
+  }
+  if (/(shoulder press|military press|lateral raise|rear delt|shoulder)/.test(raw)) {
+    return "Shoulders";
+  }
+  if (/(biceps|triceps|curl|extension corde|skull crusher|arm)/.test(raw)) {
+    return "Arms";
+  }
+  if (/(core|ab|plank|crunch|sit-up|sit up)/.test(raw)) {
+    return "Core";
+  }
+
+  return "Exercise";
+}
+
+function mergeTargetAreaIntoNotes(
+  targetArea: string,
+  notes?: string,
+) {
+  const trimmed = notes?.trim() ?? "";
+
+  if (!trimmed) {
+    return `targetArea=${targetArea}`;
+  }
+
+  if (trimmed.includes("targetArea=")) {
+    return trimmed.replace(/targetArea=([^;|]+)/i, `targetArea=${targetArea}`);
+  }
+
+  if (trimmed.startsWith("method=")) {
+    const [meta, freeform = ""] = trimmed.split("||");
+    const nextMeta = `${meta.trim()}; targetArea=${targetArea}`;
+    return freeform.trim() ? `${nextMeta} || ${freeform.trim()}` : nextMeta;
+  }
+
+  return `targetArea=${targetArea} || ${trimmed}`;
+}
+
+const sectionHeadingPatterns: { label: string; pattern: RegExp }[] = [
+  {
+    label: "Lower Body",
+    pattern: /^(jambes?|legs?|leg day|lower body|bas du corps)$/i,
+  },
   { label: "Back", pattern: /^(dos|back|pull|pull day)$/i },
   { label: "Chest", pattern: /^(pecs?|chest|push|push day)$/i },
   { label: "Shoulders", pattern: /^(epaules?|shoulders?)$/i },
@@ -57,17 +124,27 @@ const sectionHeadingPatterns: Array<{ label: string; pattern: RegExp }> = [
   { label: "Full Body", pattern: /^(full body|fullbody)$/i },
 ];
 
-function normalizeExercise(input: unknown, order: number): ParsedWorkoutExercise | null {
+function normalizeExercise(
+  input: unknown,
+  order: number,
+): ParsedWorkoutExercise | null {
   if (!input || typeof input !== "object") return null;
 
   const record = input as Record<string, unknown>;
   const name = asOptionalString(record.name);
   if (!name) return null;
 
+  const rawLine = asOptionalString(record.rawLine);
+  const normalizedName = asOptionalString(record.normalizedName);
+  const notes = asOptionalString(record.notes);
+  const targetArea = inferTargetAreaFromText(
+    [name, normalizedName, rawLine, notes].filter(Boolean).join(" "),
+  );
+
   return {
-    rawLine: asOptionalString(record.rawLine),
+    rawLine,
     name,
-    normalizedName: asOptionalString(record.normalizedName),
+    normalizedName,
     sets: asOptionalNumber(record.sets),
     reps: asOptionalNumber(record.reps),
     repMin: asOptionalNumber(record.repMin),
@@ -75,7 +152,7 @@ function normalizeExercise(input: unknown, order: number): ParsedWorkoutExercise
     weight: asOptionalNumber(record.weight),
     unit: asOptionalString(record.unit),
     restSeconds: asOptionalNumber(record.restSeconds),
-    notes: asOptionalString(record.notes),
+    notes: mergeTargetAreaIntoNotes(targetArea, notes),
     confidence: asOptionalNumber(record.confidence),
     order,
   };
@@ -94,7 +171,13 @@ function normalizeRecommendationExercise(
   const repMax = asOptionalNumber(record.repMax);
   const restSeconds = asOptionalNumber(record.restSeconds);
 
-  if (!name || sets === undefined || repMin === undefined || repMax === undefined || restSeconds === undefined) {
+  if (
+    !name ||
+    sets === undefined ||
+    repMin === undefined ||
+    repMax === undefined ||
+    restSeconds === undefined
+  ) {
     return null;
   }
 
@@ -112,13 +195,19 @@ function normalizeRecommendationExercise(
     warmup: typeof record.warmup === "boolean" ? record.warmup : undefined,
     exerciseType: asOptionalString(record.exerciseType),
     muscleGroups: Array.isArray(record.muscleGroups)
-      ? record.muscleGroups.filter((value): value is string => typeof value === "string")
+      ? record.muscleGroups.filter(
+          (value): value is string => typeof value === "string",
+        )
       : undefined,
     equipment: Array.isArray(record.equipment)
-      ? record.equipment.filter((value): value is string => typeof value === "string")
+      ? record.equipment.filter(
+          (value): value is string => typeof value === "string",
+        )
       : undefined,
     substitutions: Array.isArray(record.substitutions)
-      ? record.substitutions.filter((value): value is string => typeof value === "string")
+      ? record.substitutions.filter(
+          (value): value is string => typeof value === "string",
+        )
       : undefined,
   };
 }
@@ -156,7 +245,9 @@ function normalizeCoachAction(input: unknown): CoachAction {
   }
 
   if (type === "adjust_duration") {
-    const estimatedDurationMinutes = asOptionalNumber(record.estimatedDurationMinutes);
+    const estimatedDurationMinutes = asOptionalNumber(
+      record.estimatedDurationMinutes,
+    );
     if (estimatedDurationMinutes !== undefined) {
       return { type, estimatedDurationMinutes };
     }
@@ -169,7 +260,9 @@ function normalizeCoachAction(input: unknown): CoachAction {
   return { type: "none" };
 }
 
-function normalizeNoteWorkoutCandidate(input: unknown): NoteWorkoutCandidate | null {
+function normalizeNoteWorkoutCandidate(
+  input: unknown,
+): NoteWorkoutCandidate | null {
   if (!input || typeof input !== "object") return null;
 
   const record = input as Record<string, unknown>;
@@ -181,7 +274,10 @@ function normalizeNoteWorkoutCandidate(input: unknown): NoteWorkoutCandidate | n
     rawExcerpt,
     performedAt: asOptionalString(record.performedAt),
     confidence: asOptionalNumber(record.confidence),
-    isMostRecent: typeof record.isMostRecent === "boolean" ? record.isMostRecent : undefined,
+    isMostRecent:
+      typeof record.isMostRecent === "boolean"
+        ? record.isMostRecent
+        : undefined,
     fingerprint: asOptionalString(record.fingerprint),
   };
 }
@@ -192,7 +288,9 @@ export function validateParsedWorkout(input: unknown): ParsedWorkout {
   }
 
   const record = input as Record<string, unknown>;
-  const exercisesInput = Array.isArray(record.exercises) ? record.exercises : [];
+  const exercisesInput = Array.isArray(record.exercises)
+    ? record.exercises
+    : [];
   const exercises = exercisesInput
     .map((exercise, index) => normalizeExercise(exercise, index))
     .filter((exercise): exercise is ParsedWorkoutExercise => Boolean(exercise));
@@ -212,7 +310,9 @@ export function validateParsedWorkout(input: unknown): ParsedWorkout {
   };
 }
 
-export function validateRecommendationDraft(input: unknown): RecommendationDraft {
+export function validateRecommendationDraft(
+  input: unknown,
+): RecommendationDraft {
   if (!input || typeof input !== "object") {
     throw new Error("Recommendation must be an object");
   }
@@ -223,10 +323,14 @@ export function validateRecommendationDraft(input: unknown): RecommendationDraft
     throw new Error("Recommendation must include a title");
   }
 
-  const exercisesInput = Array.isArray(record.exercises) ? record.exercises : [];
+  const exercisesInput = Array.isArray(record.exercises)
+    ? record.exercises
+    : [];
   const exercises = exercisesInput
     .map((exercise, index) => normalizeRecommendationExercise(exercise, index))
-    .filter((exercise): exercise is RecommendationExerciseDraft => Boolean(exercise));
+    .filter((exercise): exercise is RecommendationExerciseDraft =>
+      Boolean(exercise),
+    );
 
   if (exercises.length === 0) {
     throw new Error("Recommendation must include at least one exercise");
@@ -242,7 +346,113 @@ export function validateRecommendationDraft(input: unknown): RecommendationDraft
   };
 }
 
-export function validateRefineWorkoutResponse(input: unknown): RefineWorkoutResponse {
+function normalizeTrainingPlanDay(
+  input: unknown,
+  index: number,
+): TrainingPlanDay | null {
+  if (!input || typeof input !== "object") return null;
+
+  const record = input as Record<string, unknown>;
+  const dayLabel = asOptionalString(record.dayLabel);
+  const title = asOptionalString(record.title);
+  if (!dayLabel || !title) {
+    return null;
+  }
+
+  const exercisesInput = Array.isArray(record.exercises)
+    ? record.exercises
+    : [];
+  const exercises = exercisesInput
+    .map((exercise, exerciseIndex) =>
+      normalizeRecommendationExercise(exercise, exerciseIndex),
+    )
+    .filter((exercise): exercise is RecommendationExerciseDraft =>
+      Boolean(exercise),
+    );
+
+  if (exercises.length === 0) {
+    return null;
+  }
+
+  return {
+    dayLabel,
+    title,
+    summary: asOptionalString(record.summary),
+    estimatedDurationMinutes: asOptionalNumber(record.estimatedDurationMinutes),
+    exercises: exercises.map((exercise, exerciseIndex) => ({
+      ...exercise,
+      order: exerciseIndex,
+    })),
+  };
+}
+
+function normalizeTrainingPlanWeek(
+  input: unknown,
+  index: number,
+): TrainingPlanWeek | null {
+  if (!input || typeof input !== "object") return null;
+
+  const record = input as Record<string, unknown>;
+  const title = asOptionalString(record.title);
+  const weekNumber = asOptionalNumber(record.weekNumber) ?? index + 1;
+  if (!title) {
+    return null;
+  }
+
+  const daysInput = Array.isArray(record.days) ? record.days : [];
+  const days = daysInput
+    .map((day, dayIndex) => normalizeTrainingPlanDay(day, dayIndex))
+    .filter((day): day is TrainingPlanDay => Boolean(day));
+
+  if (days.length === 0) {
+    return null;
+  }
+
+  return {
+    weekNumber,
+    title,
+    summary: asOptionalString(record.summary),
+    days,
+  };
+}
+
+export function validateTrainingPlanDraft(input: unknown): TrainingPlanDraft {
+  if (!input || typeof input !== "object") {
+    throw new Error("Training plan must be an object");
+  }
+
+  const record = input as Record<string, unknown>;
+  const blockTitle = asOptionalString(record.blockTitle);
+  if (!blockTitle) {
+    throw new Error("Training plan must include a blockTitle");
+  }
+
+  const weeksInput = Array.isArray(record.weeks) ? record.weeks : [];
+  const weeks = weeksInput
+    .map((week, index) => normalizeTrainingPlanWeek(week, index))
+    .filter((week): week is TrainingPlanWeek => Boolean(week));
+
+  if (weeks.length === 0) {
+    throw new Error("Training plan must include at least one week");
+  }
+
+  return {
+    blockTitle,
+    goal: asOptionalString(record.goal),
+    summary: asOptionalString(record.summary),
+    split: asOptionalString(record.split),
+    progressionNotes: Array.isArray(record.progressionNotes)
+      ? record.progressionNotes.filter(
+          (value): value is string => typeof value === "string",
+        )
+      : undefined,
+    weeks,
+  };
+}
+
+export function validateRefineWorkoutResponse(
+  input: unknown,
+): RefineWorkoutResponse {
   if (!input || typeof input !== "object") {
     throw new Error("Refinement response must be an object");
   }
@@ -260,19 +470,27 @@ export function validateRefineWorkoutResponse(input: unknown): RefineWorkoutResp
   };
 }
 
-export function validateNoteImportSegmentation(input: unknown): NoteImportSegmentation {
+export function validateNoteImportSegmentation(
+  input: unknown,
+): NoteImportSegmentation {
   if (!input || typeof input !== "object") {
     throw new Error("Note segmentation must be an object");
   }
 
   const record = input as Record<string, unknown>;
-  const candidatesInput = Array.isArray(record.candidates) ? record.candidates : [];
+  const candidatesInput = Array.isArray(record.candidates)
+    ? record.candidates
+    : [];
   const candidates = candidatesInput
     .map((candidate) => normalizeNoteWorkoutCandidate(candidate))
-    .filter((candidate): candidate is NoteWorkoutCandidate => Boolean(candidate));
+    .filter((candidate): candidate is NoteWorkoutCandidate =>
+      Boolean(candidate),
+    );
 
   if (candidates.length === 0) {
-    throw new Error("Note segmentation must include at least one workout candidate");
+    throw new Error(
+      "Note segmentation must include at least one workout candidate",
+    );
   }
 
   return {
@@ -281,17 +499,23 @@ export function validateNoteImportSegmentation(input: unknown): NoteImportSegmen
   };
 }
 
-export function validateParsedWorkoutCollection(input: unknown): ParsedWorkoutCollection {
+export function validateParsedWorkoutCollection(
+  input: unknown,
+): ParsedWorkoutCollection {
   if (!input || typeof input !== "object") {
     throw new Error("Parsed workout collection must be an object");
   }
 
   const record = input as Record<string, unknown>;
   const sessionsInput = Array.isArray(record.sessions) ? record.sessions : [];
-  const sessions = sessionsInput.map((session) => validateParsedWorkout(session));
+  const sessions = sessionsInput.map((session) =>
+    validateParsedWorkout(session),
+  );
 
   if (sessions.length === 0) {
-    throw new Error("Parsed workout collection must include at least one session");
+    throw new Error(
+      "Parsed workout collection must include at least one session",
+    );
   }
 
   return {
@@ -306,8 +530,12 @@ function inferSessionTitleFromBlock(block: string) {
     /squat|leg press|hack squat|lunge|rdl|romanian|hamstring|quad|calf|glute|leg curl|leg extension/.test(
       value,
     );
-  const hasPush = /bench|incline|chest|shoulder press|overhead press|dip|fly|push/.test(value);
-  const hasPull = /row|pull.?up|lat pull|pulldown|curl|rear delt|face pull|back/.test(value);
+  const hasPush =
+    /bench|incline|chest|shoulder press|overhead press|dip|fly|push/.test(
+      value,
+    );
+  const hasPull =
+    /row|pull.?up|lat pull|pulldown|curl|rear delt|face pull|back/.test(value);
 
   if (hasLower && !hasPush && !hasPull) return "Lower Body";
   if (hasPush && !hasLower && !hasPull) return "Push";
@@ -329,7 +557,14 @@ function detectSectionHeading(line: string) {
   return null;
 }
 
-type ExerciseTheme = "lower" | "push" | "pull" | "shoulders" | "arms" | "mixed" | "unknown";
+type ExerciseTheme =
+  | "lower"
+  | "push"
+  | "pull"
+  | "shoulders"
+  | "arms"
+  | "mixed"
+  | "unknown";
 
 function inferLineTheme(line: string): ExerciseTheme {
   const value = line.toLowerCase();
@@ -339,11 +574,19 @@ function inferLineTheme(line: string): ExerciseTheme {
       value,
     );
   const push =
-    /bench|incline|press|chest|pec|dip|fly|convergent machine press|machine press/.test(value);
+    /bench|incline|press|chest|pec|dip|fly|convergent machine press|machine press/.test(
+      value,
+    );
   const pull =
-    /row|pulldown|lat pull|pull-up|pull up|back|rear delt|face pull/.test(value);
-  const shoulders = /lateral raise|shoulder press|overhead press|rear delt raise/.test(value);
-  const arms = /curl|triceps|pushdown|extension corde|skull crusher|hammer curl/.test(value);
+    /row|pulldown|lat pull|pull-up|pull up|back|rear delt|face pull/.test(
+      value,
+    );
+  const shoulders =
+    /lateral raise|shoulder press|overhead press|rear delt raise/.test(value);
+  const arms =
+    /curl|triceps|pushdown|extension corde|skull crusher|hammer curl/.test(
+      value,
+    );
 
   const hits = [lower, push, pull, shoulders, arms].filter(Boolean).length;
   if (hits > 1) return "mixed";
@@ -374,7 +617,6 @@ function themeToTitle(theme: ExerciseTheme) {
 }
 
 function workoutSignalScore(block: string) {
-  const lower = block.toLowerCase();
   const nonEmptyLines = block
     .split("\n")
     .map((line) => line.trim())
@@ -383,7 +625,8 @@ function workoutSignalScore(block: string) {
   let score = 0;
   for (const line of nonEmptyLines) {
     if (/\d/.test(line)) score += 1;
-    if (/@|kg|lb|\bx\b|sets?|reps?|mins?|min/.test(line.toLowerCase())) score += 2;
+    if (/@|kg|lb|\bx\b|sets?|reps?|mins?|min/.test(line.toLowerCase()))
+      score += 2;
     if (
       /squat|bench|row|curl|press|pulldown|pull-up|pull up|deadlift|lunge|extension|raise|fly|dip/.test(
         line.toLowerCase(),
@@ -413,7 +656,9 @@ function buildHeuristicCandidates(rawText: string): NoteWorkoutCandidate[] {
     .map((block) => block.trim())
     .filter((block) => block.length >= 20);
 
-  const workoutBlocks = blocks.filter((block) => workoutSignalScore(block) >= 6);
+  const workoutBlocks = blocks.filter(
+    (block) => workoutSignalScore(block) >= 6,
+  );
   if (workoutBlocks.length < 2) {
     return [];
   }
@@ -433,7 +678,7 @@ function buildThemeRunCandidates(rawText: string): NoteWorkoutCandidate[] {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  const sessions: Array<{ theme: ExerciseTheme; lines: string[] }> = [];
+  const sessions: { theme: ExerciseTheme; lines: string[] }[] = [];
   let current: { theme: ExerciseTheme; lines: string[] } | null = null;
 
   for (const line of lines) {
@@ -454,7 +699,8 @@ function buildThemeRunCandidates(rawText: string): NoteWorkoutCandidate[] {
       continue;
     }
 
-    const currentIsBroad = current.theme === "arms" || current.theme === "shoulders";
+    const currentIsBroad =
+      current.theme === "arms" || current.theme === "shoulders";
     const nextIsBroad = theme === "arms" || theme === "shoulders";
     const compatible =
       theme === current.theme ||
@@ -472,13 +718,20 @@ function buildThemeRunCandidates(rawText: string): NoteWorkoutCandidate[] {
       continue;
     }
 
-    if (workoutSignalScore(current.lines.join("\n")) >= 6 && current.lines.length >= 2) {
+    if (
+      workoutSignalScore(current.lines.join("\n")) >= 6 &&
+      current.lines.length >= 2
+    ) {
       sessions.push(current);
     }
     current = { theme, lines: [line] };
   }
 
-  if (current && workoutSignalScore(current.lines.join("\n")) >= 6 && current.lines.length >= 2) {
+  if (
+    current &&
+    workoutSignalScore(current.lines.join("\n")) >= 6 &&
+    current.lines.length >= 2
+  ) {
     sessions.push(current);
   }
 
@@ -501,7 +754,7 @@ function buildHeadingCandidates(rawText: string): NoteWorkoutCandidate[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-  const sections: Array<{ title: string; lines: string[] }> = [];
+  const sections: { title: string; lines: string[] }[] = [];
   let current: { title: string; lines: string[] } | null = null;
 
   for (const line of lines) {
@@ -538,22 +791,32 @@ function buildHeadingCandidates(rawText: string): NoteWorkoutCandidate[] {
   }));
 }
 
-function shouldUseHeuristicSegmentation(rawText: string, segmentation: NoteImportSegmentation) {
+function shouldUseHeuristicSegmentation(
+  rawText: string,
+  segmentation: NoteImportSegmentation,
+) {
   if (segmentation.candidates.length !== 1) {
     return false;
   }
 
   const normalized = normalizeMultilineText(rawText);
-  const onlyCandidate = normalizeMultilineText(segmentation.candidates[0]?.rawExcerpt ?? "");
-  const candidateCoverage = normalized.length > 0 ? onlyCandidate.length / normalized.length : 1;
-  const hasMultipleParagraphs = normalized.split(/\n{2,}/).filter((block) => block.trim().length > 0).length >= 3;
+  const onlyCandidate = normalizeMultilineText(
+    segmentation.candidates[0]?.rawExcerpt ?? "",
+  );
+  const candidateCoverage =
+    normalized.length > 0 ? onlyCandidate.length / normalized.length : 1;
+  const hasMultipleParagraphs =
+    normalized.split(/\n{2,}/).filter((block) => block.trim().length > 0)
+      .length >= 3;
   const hasMultipleHeadings =
     normalized
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => detectSectionHeading(line)).length >= 2;
 
-  return candidateCoverage > 0.8 && (hasMultipleParagraphs || hasMultipleHeadings);
+  return (
+    candidateCoverage > 0.8 && (hasMultipleParagraphs || hasMultipleHeadings)
+  );
 }
 
 function noteHasMultipleThemes(rawText: string) {
@@ -570,6 +833,15 @@ function buildParseWorkoutPrompt(rawText: string) {
     "Convert messy gym notes into strict JSON.",
     "Do not invent exercises that are not implied by the note.",
     "If a value is missing, omit it instead of guessing aggressively.",
+    "The raw text can include a final section called 'Additional context from the user'.",
+    "Treat that section as authoritative clarification for how to interpret the workout.",
+    "Only mark an exercise as Superset when the text is explicit (keywords like 'superset', 'super set', or a clear paired-expression).",
+    "Do not infer Superset from short rest, no rest, fatigue cues, or generic sequencing alone.",
+    "If the user says exercises are in a superset, dropset, or another pairing/method, reflect that explicitly in the notes fields of the affected exercises.",
+    "If the user gives relationship or ordering context, preserve it instead of ignoring it.",
+    "For every exercise, infer a target area and store it in notes metadata as targetArea=Lower, targetArea=Push, targetArea=Pull, targetArea=Shoulders, targetArea=Arms, targetArea=Core, or targetArea=Exercise.",
+    "Use these rules consistently: back/rows/pulldowns = Pull. chest/pec pressing = Push. shoulder pressing and lateral/rear-delt work = Shoulders. biceps/triceps isolation = Arms. legs/quads/glutes/hamstrings/calves/leg press/squat/hack/lunge = Lower.",
+    "When notes already contain metadata like method=... or timeline..., append targetArea to that metadata instead of putting it only in free text.",
     "Return only valid JSON with this shape:",
     JSON.stringify(
       {
@@ -591,7 +863,7 @@ function buildParseWorkoutPrompt(rawText: string) {
             weight: 90,
             unit: "kg",
             restSeconds: 120,
-            notes: "felt heavy",
+            notes: "method=Standard; targetArea=Lower || felt heavy",
             confidence: 0.92,
           },
         ],
@@ -620,7 +892,8 @@ function buildGenerateWorkoutPrompt(input: {
       {
         title: "Lower Body + Core",
         goal: "hypertrophy",
-        coachSummary: "Leg focus with manageable fatigue after the previous push session.",
+        coachSummary:
+          "Leg focus with manageable fatigue after the previous push session.",
         explanation: "Short explanation of progression logic.",
         estimatedDurationMinutes: 45,
         exercises: [
@@ -656,6 +929,73 @@ function buildGenerateWorkoutPrompt(input: {
   ].join("\n");
 }
 
+function buildGenerateTrainingPlanPrompt(input: {
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+}) {
+  return [
+    "You are an AI strength and hypertrophy coach.",
+    "Build an initial 4-week training plan in strict JSON only.",
+    "This is not just one next workout. It is a week-by-week structure with training days inside each week.",
+    "Use the user's profile choices to decide split, exercise selection, weekly structure, and progression.",
+    "Keep all days realistic for the user's session duration and equipment.",
+    "If the user has limitations, avoid conflicting exercises.",
+    "Return only valid JSON with this shape:",
+    JSON.stringify(
+      {
+        blockTitle: "4-Week Lower Body Growth Block",
+        goal: "muscle_gain",
+        summary:
+          "A 4-week block focused on lower body growth with upper support work.",
+        split: "Upper / Lower",
+        progressionNotes: [
+          "Week 1 sets the baseline.",
+          "Week 2 adds small overload.",
+          "Week 3 pushes the main lifts.",
+          "Week 4 pulls fatigue down slightly.",
+        ],
+        weeks: [
+          {
+            weekNumber: 1,
+            title: "Week 1",
+            summary: "Baseline volume and movement selection.",
+            days: [
+              {
+                dayLabel: "Mon",
+                title: "Lower A",
+                summary: "Quad-focused day with controlled accessories.",
+                estimatedDurationMinutes: 45,
+                exercises: [
+                  {
+                    name: "Hack Squat",
+                    normalizedName: "hack squat",
+                    sets: 4,
+                    repMin: 8,
+                    repMax: 10,
+                    restSeconds: 120,
+                    targetRpe: 8,
+                    notes: "Leave 1-2 reps in reserve.",
+                    exerciseType: "compound",
+                    muscleGroups: ["quads", "glutes"],
+                    equipment: ["machine"],
+                    substitutions: ["Leg Press"],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "User profile:",
+    JSON.stringify(input.userProfile ?? null),
+    "Recent workouts:",
+    JSON.stringify(input.recentWorkouts ?? []),
+  ].join("\n");
+}
+
 function buildSegmentNoteImportPrompt(rawText: string) {
   return [
     "You are a workout-note segmentation assistant.",
@@ -677,7 +1017,8 @@ function buildSegmentNoteImportPrompt(rawText: string) {
         candidates: [
           {
             title: "Lower body",
-            rawExcerpt: "exact excerpt or condensed excerpt of one workout block",
+            rawExcerpt:
+              "exact excerpt or condensed excerpt of one workout block",
             performedAt: "optional ISO date if explicit",
             confidence: 0.9,
             isMostRecent: true,
@@ -854,7 +1195,7 @@ async function requestJsonFromOpenAI(options: {
   }
 
   const data = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    choices?: { message?: { content?: string } }[];
   };
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
@@ -867,7 +1208,9 @@ async function requestJsonFromOpenAI(options: {
   };
 }
 
-export async function parseWorkoutNoteWithOpenAI(rawText: string): Promise<ParseWorkoutResult> {
+export async function parseWorkoutNoteWithOpenAI(
+  rawText: string,
+): Promise<ParseWorkoutResult> {
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_PARSE_WORKOUT",
     defaultModel: "gpt-4.1-mini",
@@ -891,13 +1234,33 @@ export async function generateNextWorkoutWithOpenAI(input: {
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_GENERATE_WORKOUT",
     defaultModel: "gpt-4.1-mini",
-    systemPrompt: "You generate structured workout recommendations in strict JSON.",
+    systemPrompt:
+      "You generate structured workout recommendations in strict JSON.",
     userPrompt: buildGenerateWorkoutPrompt(input),
     temperature: 0.4,
   });
 
   return {
     recommendation: validateRecommendationDraft(result.json),
+    model: result.model,
+  };
+}
+
+export async function generateTrainingPlanWithOpenAI(input: {
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+}): Promise<TrainingPlanResult> {
+  const result = await requestJsonFromOpenAI({
+    modelEnvKey: "OPENAI_MODEL_GENERATE_PLAN",
+    defaultModel: "gpt-4.1-mini",
+    systemPrompt:
+      "You generate structured 4-week training plans in strict JSON.",
+    userPrompt: buildGenerateTrainingPlanPrompt(input),
+    temperature: 0.4,
+  });
+
+  return {
+    trainingPlan: validateTrainingPlanDraft(result.json),
     model: result.model,
   };
 }
@@ -910,7 +1273,8 @@ export async function refineWorkoutWithOpenAI(input: {
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_REFINE_WORKOUT",
     defaultModel: "gpt-4.1-mini",
-    systemPrompt: "You refine workout recommendations and return strict JSON only.",
+    systemPrompt:
+      "You refine workout recommendations and return strict JSON only.",
     userPrompt: buildRefineWorkoutPrompt(input),
     temperature: 0.4,
   });
@@ -921,22 +1285,29 @@ export async function refineWorkoutWithOpenAI(input: {
   };
 }
 
-export async function segmentNoteImportWithOpenAI(rawText: string): Promise<SegmentNoteImportResult> {
+export async function segmentNoteImportWithOpenAI(
+  rawText: string,
+): Promise<SegmentNoteImportResult> {
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_SEGMENT_NOTE_IMPORT",
     defaultModel: "gpt-4.1-mini",
-    systemPrompt: "You segment long messy notes into likely workout-session candidates in strict JSON.",
+    systemPrompt:
+      "You segment long messy notes into likely workout-session candidates in strict JSON.",
     userPrompt: buildSegmentNoteImportPrompt(rawText),
     temperature: 0.2,
   });
 
   let finalSegmentation = validateNoteImportSegmentation(result.json);
 
-  if (shouldUseHeuristicSegmentation(rawText, finalSegmentation) && noteHasMultipleThemes(rawText)) {
+  if (
+    shouldUseHeuristicSegmentation(rawText, finalSegmentation) &&
+    noteHasMultipleThemes(rawText)
+  ) {
     const themeResult = await requestJsonFromOpenAI({
       modelEnvKey: "OPENAI_MODEL_SEGMENT_NOTE_IMPORT",
       defaultModel: "gpt-4.1-mini",
-      systemPrompt: "You split a messy note into separate workout sessions by headings and body-part themes.",
+      systemPrompt:
+        "You split a messy note into separate workout sessions by headings and body-part themes.",
       userPrompt: buildThemeSplitPrompt(rawText),
       temperature: 0.1,
     });
@@ -971,7 +1342,8 @@ export async function parseWorkoutCollectionWithOpenAI(
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_PARSE_WORKOUT_COLLECTION",
     defaultModel: "gpt-4.1-mini",
-    systemPrompt: "You directly convert a long messy workout note into multiple structured workout sessions in strict JSON.",
+    systemPrompt:
+      "You directly convert a long messy workout note into multiple structured workout sessions in strict JSON.",
     userPrompt: buildDirectMultiSessionParsePrompt(rawText),
     temperature: 0.2,
   });

@@ -1,4 +1,75 @@
-import type { NoteImportSegmentation, ParsedWorkoutCollection, RecommendationDraft } from "@/lib/ai-types";
+import type {
+  NoteImportSegmentation,
+  ParsedWorkoutCollection,
+  RecommendationDraft,
+  TrainingPlanDraft,
+} from "@/lib/ai-types";
+
+export type AiContextUser = {
+  id: string;
+  name: string;
+  email: string;
+  goal: string | null;
+  level: string | null;
+  frequencyPerWeek: number | null;
+  sessionDuration: number | null;
+  equipment: unknown;
+  splitPreference: string | null;
+  heightCm: number | null;
+  weightKg: number | null;
+  experienceYears: number | null;
+  trainingLocation: string | null;
+  preferredStyles: unknown;
+  favoriteExercises: unknown;
+  avoidedExercises: unknown;
+  priorityMuscles: unknown;
+  limitations: unknown;
+  jobActivityLevel: string | null;
+  preferredTrainingTimes: unknown;
+  availableDays: unknown;
+  onboardingCompletedAt: string | null;
+};
+
+export type AiContextWorkout = {
+  id: string;
+  title: string;
+  rawText: string;
+  cleanedSummary: string | null;
+  sessionType: string | null;
+  fatigueNote: string | null;
+  performedAt: string | null;
+  createdAt: string;
+  exercises: unknown[];
+};
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+export function toAiUserProfile(user: AiContextUser | null) {
+  if (!user) return null;
+
+  return {
+    goal: user.goal ?? "muscle_gain",
+    level: user.level ?? "intermediate",
+    frequencyPerWeek: user.frequencyPerWeek ?? 4,
+    sessionDuration: user.sessionDuration ?? 45,
+    equipment: asStringArray(user.equipment),
+    splitPreference: user.splitPreference ?? "upper_lower",
+    heightCm: user.heightCm ?? undefined,
+    weightKg: user.weightKg ?? undefined,
+    experienceYears: user.experienceYears ?? undefined,
+    trainingLocation: user.trainingLocation ?? undefined,
+    preferredStyles: asStringArray(user.preferredStyles),
+    favoriteExercises: asStringArray(user.favoriteExercises),
+    avoidedExercises: asStringArray(user.avoidedExercises),
+    priorityMuscles: asStringArray(user.priorityMuscles),
+    limitations: asStringArray(user.limitations),
+    jobActivityLevel: user.jobActivityLevel ?? undefined,
+    preferredTrainingTimes: asStringArray(user.preferredTrainingTimes),
+    availableDays: asStringArray(user.availableDays),
+  };
+}
 
 function getApiBaseUrl() {
   return process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8081";
@@ -60,6 +131,19 @@ export function generateNextWorkout(payload: {
   }>("/api/ai/generate-next-workout", payload);
 }
 
+export function generateTrainingPlan(payload: {
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+}) {
+  return postJson<{
+    ok: true;
+    model: string;
+    trainingPlan: TrainingPlanDraft;
+    trainingPlanId: string;
+    threadId: string;
+  }>("/api/ai/generate-training-plan", payload);
+}
+
 export function refineWorkout(payload: {
   currentRecommendation: RecommendationDraft;
   recommendationId: string;
@@ -88,26 +172,58 @@ export function saveParsedWorkout(payload: { rawText: string; parsedWorkout: unk
   }>("/api/ai/save-parsed-workout", payload);
 }
 
+export function deleteWorkout(workoutId: string) {
+  return postJson<{ ok: true; workoutId: string }>("/api/delete-workout", {
+    workoutId,
+  });
+}
+
+export function deleteWorkoutExercise(exerciseId: string) {
+  return postJson<{ ok: true; exerciseId: string; workoutId: string }>(
+    "/api/delete-workout-exercise",
+    {
+      exerciseId,
+    },
+  );
+}
+
 export function getAiContext() {
   return getJson<{
     ok: true;
-    user: {
-      id: string;
-      name: string;
-      email: string;
-      goal: string | null;
-      level: string | null;
-      frequencyPerWeek: number | null;
-      sessionDuration: number | null;
-      equipment: unknown;
-      splitPreference: string | null;
-    } | null;
-    recentWorkouts: unknown[];
+    user: AiContextUser | null;
+    recentWorkouts: AiContextWorkout[];
     latestRecommendation: RecommendationDraft | null;
     latestWorkoutId: string | null;
     latestRecommendationId: string | null;
     latestThreadId: string | null;
   }>("/api/ai/context");
+}
+
+export function updateProfile(payload: {
+  goal?: string;
+  level?: string;
+  frequencyPerWeek?: number;
+  sessionDuration?: number;
+  splitPreference?: string;
+  trainingLocation?: string;
+  jobActivityLevel?: string;
+  heightCm?: number;
+  weightKg?: number;
+  experienceYears?: number;
+  equipment?: string[];
+  preferredStyles?: string[];
+  favoriteExercises?: string[];
+  avoidedExercises?: string[];
+  priorityMuscles?: string[];
+  limitations?: string[];
+  preferredTrainingTimes?: string[];
+  availableDays?: string[];
+  completeOnboarding?: boolean;
+}) {
+  return postJson<{
+    ok: true;
+    user: AiContextUser;
+  }>("/api/profile", payload);
 }
 
 export function importNote(payload: {
@@ -119,7 +235,7 @@ export function importNote(payload: {
     model: string;
     noteImportId: string;
     summary?: NoteImportSegmentation["summary"];
-    candidates: Array<{
+    candidates: {
       id: string;
       title: string | null;
       rawExcerpt: string;
@@ -129,7 +245,7 @@ export function importNote(payload: {
       dedupeStatus: "PENDING" | "NEW" | "POSSIBLE_DUPLICATE" | "DUPLICATE";
       dedupeReason: string | null;
       matchedWorkoutId: string | null;
-    }>;
+    }[];
   }>("/api/ai/import-note", payload);
 }
 

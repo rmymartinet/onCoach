@@ -6,15 +6,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
 
-type NavKey = "home" | "add" | "stats" | "profile";
+type NavKey = "home" | "stats" | "profile";
 
 const items: {
   key: NavKey;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
-  href: "/home" | "/add-workout" | "/stats-detail" | "/profile";
+  href: "/home" | "/stats-detail" | "/profile";
 }[] = [
   { key: "home", icon: "home-outline", href: "/home" },
-  { key: "add", icon: "view-grid-outline", href: "/add-workout" },
   { key: "stats", icon: "chart-bar", href: "/stats-detail" },
   { key: "profile", icon: "account-outline", href: "/profile" },
 ];
@@ -48,6 +47,12 @@ export function FloatingNav({ active }: { active: NavKey }) {
             </Pressable>
           );
         })}
+        <Pressable
+          style={({ pressed }) => [styles.addButton, pressed && styles.pressed]}
+          onPress={() => router.push("/ai-workspace")}
+        >
+          <MaterialCommunityIcons name="plus" size={22} color="#0d1015" />
+        </Pressable>
       </View>
     </View>
   );
@@ -55,7 +60,6 @@ export function FloatingNav({ active }: { active: NavKey }) {
 
 function labelFor(key: NavKey) {
   if (key === "home") return "Home";
-  if (key === "add") return "Add";
   if (key === "stats") return "Stats";
   return "Me";
 }
@@ -72,12 +76,12 @@ const styles = StyleSheet.create({
     minHeight: 58,
     borderRadius: 999,
     backgroundColor: "#07090d",
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     paddingVertical: 8,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
+    gap: 10,
     shadowColor: "#000000",
     shadowOpacity: 0.12,
     shadowRadius: 18,
@@ -104,6 +108,15 @@ const styles = StyleSheet.create({
     ...Typography.caption,
     color: "#111318",
     fontWeight: "700",
+  },
+  addButton: {
+    width: 50,
+    height: 50,
+    borderRadius: 99,
+    backgroundColor: "#f2f2f4",
+    alignItems: "center",
+    justifyContent: "center",
+    marginHorizontal: 2,
   },
   pressed: {
     opacity: 0.9,

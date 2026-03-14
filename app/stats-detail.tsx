@@ -89,7 +89,7 @@ export default function StatsDetailScreen() {
           </Pressable>
           <Pressable
             style={({ pressed }) => [styles.nextButton, pressed && styles.pressed]}
-            onPress={() => router.push("/add-workout")}
+            onPress={() => router.push("/ai-workspace")}
           >
             <Text style={styles.nextText}>Next →</Text>
           </Pressable>

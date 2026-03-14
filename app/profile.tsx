@@ -1,3 +1,5 @@
+import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 
 import { FloatingNav } from "@/components/floating-nav";
@@ -5,6 +7,8 @@ import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
 
 export default function ProfileScreen() {
+  const router = useRouter();
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
@@ -27,6 +31,14 @@ export default function ProfileScreen() {
         <Pressable style={styles.card}>
           <Text style={styles.cardLabel}>Equipment</Text>
           <Text style={styles.cardValue}>Machine + free weights</Text>
+        </Pressable>
+
+        <Pressable style={({ pressed }) => [styles.linkCard, pressed && styles.pressed]} onPress={() => router.push("/quick-profile")}>
+          <View style={styles.linkCopy}>
+            <Text style={styles.linkLabel}>Onboarding</Text>
+            <Text style={styles.linkValue}>Edit your AI profile setup</Text>
+          </View>
+          <MaterialCommunityIcons name="chevron-right" size={22} color="#7e8590" />
         </Pressable>
       </View>
 
@@ -94,5 +106,38 @@ const styles = StyleSheet.create({
     ...Typography.body,
     color: "#171b22",
     fontWeight: "700",
+  },
+  linkCard: {
+    marginTop: 4,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#dddddf",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  linkCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  linkLabel: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#9aa0a8",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  linkValue: {
+    fontFamily: Fonts.sans,
+    ...Typography.body,
+    color: "#171b22",
+    fontWeight: "700",
+  },
+  pressed: {
+    opacity: 0.92,
   },
 });

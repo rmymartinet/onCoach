@@ -19,6 +19,7 @@ import {
   getAiContext,
   parseWorkoutNote,
   saveParsedWorkout,
+  toAiUserProfile,
 } from "@/lib/ai-api";
 
 const defaultWorkout =
@@ -45,18 +46,7 @@ export default function PasteWorkoutScreen() {
         const result = await getAiContext();
         if (cancelled) return;
 
-        setUserProfile(
-          result.user
-            ? {
-                goal: result.user.goal ?? "muscle_gain",
-                level: result.user.level ?? "intermediate",
-                frequencyPerWeek: result.user.frequencyPerWeek ?? 4,
-                sessionDuration: result.user.sessionDuration ?? 45,
-                equipment: Array.isArray(result.user.equipment) ? result.user.equipment : [],
-                splitPreference: result.user.splitPreference ?? "upper_lower",
-              }
-            : null,
-        );
+        setUserProfile(toAiUserProfile(result.user));
         setRecentWorkouts(result.recentWorkouts);
         setLatestWorkoutId(result.latestWorkoutId);
       } catch (nextError) {

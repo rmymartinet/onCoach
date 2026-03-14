@@ -1,14 +1,27 @@
 import { MaterialCommunityIcons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Alert, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import { FloatingNav } from "@/components/floating-nav";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
-import { deleteWorkout, deleteWorkoutExercise } from "@/lib/ai-api";
+import {
+  deleteWorkout,
+  deleteWorkoutExercise,
+  getWorkout,
+  type WorkoutDetailApiExercise,
+} from "@/lib/ai-api";
 
-type WorkoutDetailExercise = {
+type WorkoutDetailExercise = WorkoutDetailApiExercise;
+type WorkoutDetailData = {
+  title: string;
+  meta: string;
+  time: string;
+  day: string;
+};
+
+type WorkoutDetailFallbackExercise = {
   id?: string;
   name: string;
   normalizedName?: string | null;
@@ -129,14 +142,40 @@ function formatExerciseRest(exercise: WorkoutDetailExercise) {
 
 function parseExercisesParam(value?: string | string[]) {
   const raw = Array.isArray(value) ? value[0] : value;
-  if (!raw) return [] as WorkoutDetailExercise[];
+  if (!raw) return [] as WorkoutDetailFallbackExercise[];
 
   try {
-    const parsed = JSON.parse(raw) as WorkoutDetailExercise[];
+    const parsed = JSON.parse(raw) as WorkoutDetailFallbackExercise[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
+}
+
+function formatWorkoutMetaFromExercises(exercises: WorkoutDetailExercise[]) {
+  const totalSets = exercises.reduce((sum, exercise) => sum + (exercise.sets ?? 0), 0);
+  return `${totalSets} sets · ${exercises.length} exercises`;
+}
+
+function formatTimeLabel(value: string | null | undefined) {
+  if (!value) return "Saved";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatDayLabel(value: string | null | undefined) {
+  if (!value) return "Saved workout";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function parseTimelineFromNotes(notes?: string | null): TimelineMeta | null {
@@ -226,18 +265,54 @@ export default function WorkoutDetailScreen() {
     fromSaved?: string;
   }>();
 
-  const title = params.title ?? "Workout";
-  const meta = params.meta ?? "Session overview";
-  const time = params.time ?? "Saved";
-  const day = params.day ?? "Workout";
   const workoutId = params.workoutId ?? "";
-  const [exercises, setExercises] = useState(parseExercisesParam(params.exercises));
+  const [fallbackDetail] = useState<WorkoutDetailData>({
+    title: params.title ?? "Workout",
+    meta: params.meta ?? "Session overview",
+    time: params.time ?? "Saved",
+    day: params.day ?? "Workout",
+  });
+  const [workoutTitle, setWorkoutTitle] = useState(fallbackDetail.title);
+  const [workoutMeta, setWorkoutMeta] = useState(fallbackDetail.meta);
+  const [workoutTime, setWorkoutTime] = useState(fallbackDetail.time);
+  const [workoutDay, setWorkoutDay] = useState(fallbackDetail.day);
+  const [exercises, setExercises] = useState<WorkoutDetailExercise[]>(
+    parseExercisesParam(params.exercises) as WorkoutDetailExercise[],
+  );
   const [deletingExerciseId, setDeletingExerciseId] = useState<string | null>(null);
   const [deletingWorkout, setDeletingWorkout] = useState(false);
+  const [loadingWorkout, setLoadingWorkout] = useState(false);
   const planGroups = groupExercisesByWeekDay(exercises);
   const openedFromSave = params.fromSaved === "1";
   const [openWeeks, setOpenWeeks] = useState<Record<string, boolean>>({});
   const [openDays, setOpenDays] = useState<Record<string, boolean>>({});
+
+  const loadWorkout = useCallback(async () => {
+    if (!workoutId) return;
+    setLoadingWorkout(true);
+    try {
+      const result = await getWorkout(workoutId);
+      const workout = result.workout;
+      setWorkoutTitle(workout.title);
+      setWorkoutMeta(formatWorkoutMetaFromExercises(workout.exercises));
+      setWorkoutTime(formatTimeLabel(workout.performedAt ?? workout.createdAt));
+      setWorkoutDay(formatDayLabel(workout.performedAt ?? workout.createdAt));
+      setExercises(workout.exercises);
+    } finally {
+      setLoadingWorkout(false);
+    }
+  }, [workoutId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void loadWorkout();
+    }, [loadWorkout]),
+  );
+
+  const renderedTitle = workoutTitle || fallbackDetail.title;
+  const renderedMeta = workoutMeta || fallbackDetail.meta;
+  const renderedTime = workoutTime || fallbackDetail.time;
+  const renderedDay = workoutDay || fallbackDetail.day;
 
   function isWeekOpen(week: string, weekIndex: number) {
     if (Object.prototype.hasOwnProperty.call(openWeeks, week)) {
@@ -311,10 +386,10 @@ export default function WorkoutDetailScreen() {
           </View>
 
           <View style={styles.heroCard}>
-            <Text style={styles.heroEyebrow}>{day}</Text>
-            <Text style={styles.heroTitle}>{title}</Text>
-            <Text style={styles.heroMeta}>{meta}</Text>
-            <Text style={styles.heroTime}>Completed at {time}</Text>
+            <Text style={styles.heroEyebrow}>{renderedDay}</Text>
+            <Text style={styles.heroTitle}>{renderedTitle}</Text>
+            <Text style={styles.heroMeta}>{renderedMeta}</Text>
+            <Text style={styles.heroTime}>Completed at {renderedTime}</Text>
             {workoutId ? (
               <Pressable
                 style={({ pressed }) => [styles.deleteWorkoutButton, pressed && styles.pressed]}
@@ -331,7 +406,11 @@ export default function WorkoutDetailScreen() {
           <View style={styles.section}>
             <Text style={styles.sectionLabel}>EXERCISES</Text>
             <View style={styles.exerciseList}>
-              {exercises.length ? (
+              {loadingWorkout && workoutId ? (
+                <View style={styles.emptyCard}>
+                  <Text style={styles.emptyText}>Refreshing workout…</Text>
+                </View>
+              ) : exercises.length ? (
                 planGroups.map((weekGroup, weekIndex) => (
                   <View key={weekGroup.week} style={styles.weekBlock}>
                     <Pressable
@@ -393,8 +472,17 @@ export default function WorkoutDetailScreen() {
                                           router.push({
                                             pathname: "/exercise-detail",
                                             params: {
+                                              workoutId,
+                                              exerciseId: exercise.id ?? "",
                                               name: exercise.name,
                                               detail,
+                                              sets: typeof exercise.sets === "number" ? `${exercise.sets}` : "",
+                                              reps:
+                                                typeof exercise.reps === "number"
+                                                  ? `${exercise.reps}`
+                                                  : typeof exercise.repMin === "number"
+                                                    ? `${exercise.repMin}`
+                                                    : "",
                                               load: load ?? "",
                                               rest: rest ?? "",
                                               muscle,

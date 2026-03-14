@@ -59,6 +59,25 @@ function normalizeMultilineText(value: string) {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
+type ExerciseMetadata = {
+  method?: string;
+  targetArea?: string;
+  repMode?: "standard" | "failure";
+  extra?: Record<string, string>;
+};
+
+type InferredExerciseData = {
+  sets?: number;
+  reps?: number;
+  repMin?: number;
+  repMax?: number;
+  weight?: number;
+  unit?: string;
+  restSeconds?: number;
+  method?: string;
+  repMode?: "standard" | "failure";
+};
+
 function inferTargetAreaFromText(value: string) {
   const raw = value.toLowerCase();
 
@@ -88,27 +107,125 @@ function inferTargetAreaFromText(value: string) {
   return "Exercise";
 }
 
-function mergeTargetAreaIntoNotes(
-  targetArea: string,
-  notes?: string,
-) {
+function splitNotesMetadata(notes?: string) {
   const trimmed = notes?.trim() ?? "";
-
   if (!trimmed) {
-    return `targetArea=${targetArea}`;
+    return {
+      metadata: { extra: {} } as ExerciseMetadata,
+      freeform: "",
+    };
   }
 
-  if (trimmed.includes("targetArea=")) {
-    return trimmed.replace(/targetArea=([^;|]+)/i, `targetArea=${targetArea}`);
+  if (!trimmed.startsWith("method=") && !trimmed.includes("targetArea=") && !trimmed.includes("repMode=")) {
+    return {
+      metadata: { extra: {} } as ExerciseMetadata,
+      freeform: trimmed,
+    };
   }
 
-  if (trimmed.startsWith("method=")) {
-    const [meta, freeform = ""] = trimmed.split("||");
-    const nextMeta = `${meta.trim()}; targetArea=${targetArea}`;
-    return freeform.trim() ? `${nextMeta} || ${freeform.trim()}` : nextMeta;
+  const [metaPart, freeform = ""] = trimmed.split("||");
+  const metadata: ExerciseMetadata = { extra: {} };
+
+  for (const entry of metaPart.split(";").map((item) => item.trim()).filter(Boolean)) {
+    const [key, ...rest] = entry.split("=");
+    const value = rest.join("=").trim();
+    if (!key || !value) continue;
+
+    if (key === "method") metadata.method = value;
+    if (key === "targetArea") metadata.targetArea = value;
+    if (key === "repMode" && (value === "standard" || value === "failure")) {
+      metadata.repMode = value;
+    } else if (key !== "method" && key !== "targetArea" && key !== "repMode") {
+      metadata.extra![key] = value;
+    }
   }
 
-  return `targetArea=${targetArea} || ${trimmed}`;
+  return {
+    metadata,
+    freeform: freeform.trim(),
+  };
+}
+
+function detectMethodFromText(value: string) {
+  const raw = value.toLowerCase();
+  if (/(superset|super set)/.test(raw)) return "Superset";
+  if (/(drop ?set|dropset|dégressif|degressif)/.test(raw)) return "Drop set";
+  if (/rest[- ]?pause/.test(raw)) return "Rest-pause";
+  if (/myo/.test(raw)) return "Myo-reps";
+  if (/tempo/.test(raw)) return "Tempo";
+  if (/(giant set|triset|tri-set|cluster|circuit)/.test(raw)) return "Custom";
+  return undefined;
+}
+
+function inferExerciseDataFromText(value: string): InferredExerciseData {
+  const raw = value.trim();
+  const lower = raw.toLowerCase();
+  const setRepMatch = raw.match(/(\d+)\s*x\s*(\d+)(?:\s*[-a]\s*(\d+))?/i);
+  const setsOnlyMatch = raw.match(/(\d+)\s*sets?\b/i);
+  const repsOnlyMatch = raw.match(/(\d+)\s*reps?\b/i);
+  const restMinutesMatch = raw.match(/(\d+(?:[.,]\d+)?)\s*(?:min|mins|minute|minutes)\b/i);
+  const restSecondsMatch = raw.match(/(\d+(?:[.,]\d+)?)\s*(?:s|sec|secs|second|seconds|secondes?)\b/i);
+  const weightAtMatch = raw.match(/(?:@|at\s+)(\d+(?:[.,]\d+)?)\s*(kg|kgs|lb|lbs)\b/i);
+  const weightLooseMatch = raw.match(/\b(\d+(?:[.,]\d+)?)\s*(kg|kgs|lb|lbs)\b/i);
+  const repMode = /\b(echec|échec|failure)\b/i.test(lower) ? "failure" : "standard";
+  const sets = setRepMatch?.[1] ? Number(setRepMatch[1]) : setsOnlyMatch?.[1] ? Number(setsOnlyMatch[1]) : undefined;
+  const firstReps = setRepMatch?.[2] ? Number(setRepMatch[2]) : repsOnlyMatch?.[1] ? Number(repsOnlyMatch[1]) : undefined;
+  const secondReps = setRepMatch?.[3] ? Number(setRepMatch[3]) : undefined;
+  const weightMatch = weightAtMatch ?? weightLooseMatch;
+  const weight = weightMatch?.[1] ? Number(weightMatch[1].replace(",", ".")) : undefined;
+  const unit = weightMatch?.[2]?.toLowerCase().startsWith("lb") ? "lb" : weightMatch?.[2] ? "kg" : undefined;
+  const restSeconds = restMinutesMatch?.[1]
+    ? Math.round(Number(restMinutesMatch[1].replace(",", ".")) * 60)
+    : restSecondsMatch?.[1]
+      ? Math.round(Number(restSecondsMatch[1].replace(",", ".")))
+      : undefined;
+
+  return {
+    sets: Number.isFinite(sets) ? sets : undefined,
+    reps: repMode === "failure" ? undefined : Number.isFinite(firstReps) && !secondReps ? firstReps : undefined,
+    repMin: repMode === "failure" ? undefined : Number.isFinite(firstReps) ? firstReps : undefined,
+    repMax: repMode === "failure" ? undefined : Number.isFinite(secondReps) ? secondReps : Number.isFinite(firstReps) ? firstReps : undefined,
+    weight: Number.isFinite(weight) ? weight : undefined,
+    unit,
+    restSeconds,
+    method: detectMethodFromText(lower),
+    repMode,
+  };
+}
+
+function buildNotesWithMetadata(
+  notes: string | undefined,
+  metadataPatch: ExerciseMetadata,
+) {
+  const current = splitNotesMetadata(notes);
+  const metadata: ExerciseMetadata = {
+    ...current.metadata,
+    ...metadataPatch,
+    extra: {
+      ...(current.metadata.extra ?? {}),
+      ...(metadataPatch.extra ?? {}),
+    },
+  };
+
+  if (!metadata.method && (metadata.targetArea || metadata.repMode === "failure")) {
+    metadata.method = "Standard";
+  }
+
+  const parts: string[] = [];
+  if (metadata.method) parts.push(`method=${metadata.method}`);
+  if (metadata.targetArea) parts.push(`targetArea=${metadata.targetArea}`);
+  if (metadata.repMode === "failure") parts.push("repMode=failure");
+  for (const [key, value] of Object.entries(metadata.extra ?? {})) {
+    if (value.trim()) {
+      parts.push(`${key}=${value}`);
+    }
+  }
+
+  if (!parts.length) {
+    return current.freeform || undefined;
+  }
+
+  return current.freeform ? `${parts.join("; ")} || ${current.freeform}` : parts.join("; ");
 }
 
 const sectionHeadingPatterns: { label: string; pattern: RegExp }[] = [
@@ -137,22 +254,26 @@ function normalizeExercise(
   const rawLine = asOptionalString(record.rawLine);
   const normalizedName = asOptionalString(record.normalizedName);
   const notes = asOptionalString(record.notes);
-  const targetArea = inferTargetAreaFromText(
-    [name, normalizedName, rawLine, notes].filter(Boolean).join(" "),
-  );
+  const sourceText = [name, normalizedName, rawLine, notes].filter(Boolean).join(" ");
+  const targetArea = inferTargetAreaFromText(sourceText);
+  const inferred = inferExerciseDataFromText(sourceText);
 
   return {
     rawLine,
     name,
     normalizedName,
-    sets: asOptionalNumber(record.sets),
-    reps: asOptionalNumber(record.reps),
-    repMin: asOptionalNumber(record.repMin),
-    repMax: asOptionalNumber(record.repMax),
-    weight: asOptionalNumber(record.weight),
-    unit: asOptionalString(record.unit),
-    restSeconds: asOptionalNumber(record.restSeconds),
-    notes: mergeTargetAreaIntoNotes(targetArea, notes),
+    sets: asOptionalNumber(record.sets) ?? inferred.sets,
+    reps: asOptionalNumber(record.reps) ?? inferred.reps,
+    repMin: asOptionalNumber(record.repMin) ?? inferred.repMin,
+    repMax: asOptionalNumber(record.repMax) ?? inferred.repMax,
+    weight: asOptionalNumber(record.weight) ?? inferred.weight,
+    unit: asOptionalString(record.unit) ?? inferred.unit,
+    restSeconds: asOptionalNumber(record.restSeconds) ?? inferred.restSeconds,
+    notes: buildNotesWithMetadata(notes, {
+      targetArea,
+      method: inferred.method,
+      repMode: inferred.repMode,
+    }),
     confidence: asOptionalNumber(record.confidence),
     order,
   };

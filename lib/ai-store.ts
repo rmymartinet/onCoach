@@ -70,11 +70,23 @@ export async function saveParsedWorkout(params: {
   parsedWorkout: ParsedWorkout;
 }) {
   const { userId, rawText, parsedWorkout } = params;
+  const normalizedTitle =
+    parsedWorkout.title?.trim() ||
+    parsedWorkout.cleanedSummary?.trim() ||
+    parsedWorkout.sessionType?.replaceAll("_", " ").trim() ||
+    "Workout";
+  const normalizedExercises = [...parsedWorkout.exercises]
+    .sort((left, right) => left.order - right.order)
+    .map((exercise, index) => ({
+      ...exercise,
+      order: index,
+      notes: exercise.notes?.trim() || undefined,
+    }));
 
   const workout = await prisma.workout.create({
     data: {
       userId,
-      title: parsedWorkout.title,
+      title: normalizedTitle,
       rawText,
       cleanedSummary: parsedWorkout.cleanedSummary,
       sessionType: parsedWorkout.sessionType,
@@ -85,24 +97,24 @@ export async function saveParsedWorkout(params: {
     },
   });
 
-  if (parsedWorkout.exercises.length > 0) {
-    for (const exercise of parsedWorkout.exercises) {
+  if (normalizedExercises.length > 0) {
+    for (const exercise of normalizedExercises) {
       await prisma.workoutExercise.create({
         data: {
-        workoutId: workout.id,
-        rawLine: exercise.rawLine,
-        exerciseName: exercise.name,
-        normalizedName: exercise.normalizedName,
-        sets: exercise.sets,
-        reps: exercise.reps,
-        repMin: exercise.repMin,
-        repMax: exercise.repMax,
-        weight: exercise.weight,
-        unit: exercise.unit,
-        restSeconds: exercise.restSeconds,
-        notes: exercise.notes,
-        confidence: exercise.confidence,
-        order: exercise.order,
+          workoutId: workout.id,
+          rawLine: exercise.rawLine,
+          exerciseName: exercise.name,
+          normalizedName: exercise.normalizedName,
+          sets: exercise.sets,
+          reps: exercise.reps,
+          repMin: exercise.repMin,
+          repMax: exercise.repMax,
+          weight: exercise.weight,
+          unit: exercise.unit,
+          restSeconds: exercise.restSeconds,
+          notes: exercise.notes,
+          confidence: exercise.confidence,
+          order: exercise.order,
         },
       });
     }

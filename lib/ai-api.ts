@@ -42,6 +42,33 @@ export type AiContextWorkout = {
   exercises: unknown[];
 };
 
+export type WorkoutDetailApiExercise = {
+  id: string;
+  name: string;
+  normalizedName?: string | null;
+  sets?: number | null;
+  reps?: number | null;
+  repMin?: number | null;
+  repMax?: number | null;
+  weight?: number | null;
+  unit?: string | null;
+  restSeconds?: number | null;
+  notes?: string | null;
+  order: number;
+};
+
+export type WorkoutDetailApiWorkout = {
+  id: string;
+  title: string;
+  rawText: string;
+  cleanedSummary: string | null;
+  sessionType: string | null;
+  fatigueNote: string | null;
+  performedAt: string | null;
+  createdAt: string;
+  exercises: WorkoutDetailApiExercise[];
+};
+
 function asStringArray(value: unknown) {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -185,6 +212,32 @@ export function deleteWorkoutExercise(exerciseId: string) {
       exerciseId,
     },
   );
+}
+
+export function getWorkout(workoutId: string) {
+  return postJson<{
+    ok: true;
+    workout: WorkoutDetailApiWorkout;
+  }>("/api/get-workout", { workoutId });
+}
+
+export function updateWorkoutExercise(payload: {
+  exerciseId: string;
+  workoutId: string;
+  name?: string;
+  sets?: number | null;
+  reps?: number | null;
+  repMin?: number | null;
+  repMax?: number | null;
+  weight?: number | null;
+  unit?: string | null;
+  restSeconds?: number | null;
+  notes?: string | null;
+}) {
+  return postJson<{
+    ok: true;
+    exercise: WorkoutDetailApiExercise;
+  }>("/api/update-workout-exercise", payload);
 }
 
 export function getAiContext() {

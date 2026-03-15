@@ -15,7 +15,7 @@ import {
 import { FloatingNav } from "@/components/floating-nav";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
-import { getAiContext } from "@/lib/ai-api";
+import { getAiContext, type AiContextTrainingPlan } from "@/lib/ai-api";
 
 type HomeWorkoutExercise = {
   id: string;
@@ -76,6 +76,15 @@ type HomeProgramRow = {
   totalSets: number;
   lastPerformedLabel: string;
   latestWorkout: HomeWorkout;
+};
+
+type HomeTrainingPlanRow = {
+  key: string;
+  id: string;
+  title: string;
+  summary: string;
+  meta: string;
+  updatedLabel: string;
 };
 
 function buildTrendTop(value: number) {
@@ -203,6 +212,23 @@ function buildProgramRows(workouts: HomeWorkout[]): HomeProgramRow[] {
       const bDate = getWorkoutDate(b.latestWorkout).getTime();
       return bDate - aDate;
     });
+}
+
+function buildTrainingPlanRows(trainingPlans: AiContextTrainingPlan[]): HomeTrainingPlanRow[] {
+  return trainingPlans.map((plan) => {
+    const weekCount = plan.weeks.length;
+    const dayCount = plan.weeks.reduce((sum, week) => sum + week.days.length, 0);
+    const summary = plan.summary?.trim() || plan.split?.trim() || "Structured training plan";
+
+    return {
+      key: plan.id,
+      id: plan.id,
+      title: plan.title,
+      summary,
+      meta: `${weekCount} weeks · ${dayCount} days`,
+      updatedLabel: formatDayLabel(plan.updatedAt),
+    };
+  });
 }
 
 function buildWeekDays(workouts: HomeWorkout[]) {
@@ -467,6 +493,7 @@ export default function HomeScreen() {
   const [userName, setUserName] = useState("Athlete");
   const [splitPreference, setSplitPreference] = useState<string | null>(null);
   const [recentWorkouts, setRecentWorkouts] = useState<HomeWorkout[]>([]);
+  const [trainingPlans, setTrainingPlans] = useState<AiContextTrainingPlan[]>([]);
   const [latestRecommendation, setLatestRecommendation] = useState<HomeRecommendation>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -484,6 +511,7 @@ export default function HomeScreen() {
           setUserName(result.user?.name?.trim() || "Athlete");
           setSplitPreference(result.user?.splitPreference ?? null);
           setRecentWorkouts(result.recentWorkouts as HomeWorkout[]);
+          setTrainingPlans((result.trainingPlans as AiContextTrainingPlan[]) ?? []);
           setLatestRecommendation((result.latestRecommendation as HomeRecommendation) ?? null);
           setError(null);
         } catch (nextError) {
@@ -509,6 +537,7 @@ export default function HomeScreen() {
   const selectedDay = weekDays.find((day) => day.id === selectedDayId) ?? weekDays[0] ?? null;
   const trendData = useMemo(() => buildTrendSeries(recentWorkouts), [recentWorkouts]);
   const programRows = useMemo(() => buildProgramRows(recentWorkouts), [recentWorkouts]);
+  const trainingPlanRows = useMemo(() => buildTrainingPlanRows(trainingPlans), [trainingPlans]);
   const recentSessionRows = recentWorkouts.slice(0, 2);
   const todayName = new Date().toLocaleDateString("en-US", { weekday: "long" });
 
@@ -712,7 +741,35 @@ export default function HomeScreen() {
                   ) : null}
                 </View>
 
-                {programRows.length ? (
+                {trainingPlanRows.length ? (
+                  <View style={styles.programsList}>
+                    {trainingPlanRows.slice(0, 6).map((program) => (
+                      <Pressable
+                        key={program.key}
+                        style={({ pressed }) => [styles.programRow, pressed && styles.pressed]}
+                        onPress={() =>
+                          router.push({
+                            pathname: "/program-detail",
+                            params: {
+                              trainingPlanId: program.id,
+                              title: program.title,
+                            },
+                          })
+                        }
+                      >
+                        <View style={styles.programRowMain}>
+                          <Text style={styles.programRowTitle}>{program.title}</Text>
+                          <Text style={styles.programRowMeta}>{program.summary}</Text>
+                          <Text style={styles.programRowMeta}>{program.meta}</Text>
+                        </View>
+                        <View style={styles.programRowAside}>
+                          <Text style={styles.programRowDate}>{program.updatedLabel}</Text>
+                          <MaterialCommunityIcons name="chevron-right" size={20} color="#8a9098" />
+                        </View>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : programRows.length ? (
                   <View style={styles.programsList}>
                     {programRows.slice(0, 6).map((program) => (
                       <Pressable

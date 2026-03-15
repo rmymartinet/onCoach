@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { prisma } from "@/lib/prisma";
 import type {
+  NextTrainingDayDraft,
   NoteImportSegmentation,
   NoteWorkoutCandidate,
   ParsedWorkout,
@@ -295,6 +296,233 @@ export async function createTrainingPlanRecord(params: {
     thread,
     serialized: serializeTrainingPlan(trainingPlan),
   };
+}
+
+export async function updateTrainingPlanRecord(params: {
+  userId: string;
+  trainingPlanId: string;
+  trainingPlan: TrainingPlanDraft;
+}) {
+  const { userId, trainingPlanId, trainingPlan } = params;
+
+  const existingPlan = await prisma.trainingPlan.findFirst({
+    where: {
+      id: trainingPlanId,
+      userId,
+    },
+    select: { id: true },
+  });
+
+  if (!existingPlan) {
+    throw new Error("Training plan not found");
+  }
+
+  await prisma.trainingPlan.update({
+    where: { id: trainingPlanId },
+    data: {
+      title: trainingPlan.blockTitle,
+      goal: trainingPlan.goal,
+      summary: trainingPlan.summary,
+      split: trainingPlan.split,
+      progressionNotes: trainingPlan.progressionNotes ?? [],
+      updatedAt: new Date(),
+    },
+  });
+
+  await prisma.trainingWeek.deleteMany({
+    where: {
+      planId: trainingPlanId,
+    },
+  });
+
+  for (const week of trainingPlan.weeks) {
+    const createdWeek = await prisma.trainingWeek.create({
+      data: {
+        planId: trainingPlanId,
+        weekNumber: week.weekNumber,
+        title: week.title,
+        summary: week.summary,
+      },
+    });
+
+    for (const [dayIndex, day] of week.days.entries()) {
+      const createdDay = await prisma.trainingDay.create({
+        data: {
+          weekId: createdWeek.id,
+          order: dayIndex,
+          dayLabel: day.dayLabel,
+          title: day.title,
+          summary: day.summary,
+          estimatedDurationMinutes: day.estimatedDurationMinutes,
+        },
+      });
+
+      for (const exercise of day.exercises) {
+        await prisma.trainingDayExercise.create({
+          data: {
+            dayId: createdDay.id,
+            order: exercise.order,
+            name: exercise.name,
+            normalizedName: exercise.normalizedName,
+            sets: exercise.sets,
+            repMin: exercise.repMin,
+            repMax: exercise.repMax,
+            restSeconds: exercise.restSeconds,
+            targetRpe: exercise.targetRpe,
+            rir: exercise.rir,
+            notes: exercise.notes,
+            warmup: exercise.warmup ?? false,
+            exerciseType: exercise.exerciseType,
+            muscleGroups: exercise.muscleGroups ?? [],
+            equipment: exercise.equipment ?? [],
+            substitutions: exercise.substitutions ?? [],
+          },
+        });
+      }
+    }
+  }
+
+  return prisma.trainingPlan.findUniqueOrThrow({
+    where: { id: trainingPlanId },
+    include: {
+      weeks: {
+        orderBy: { weekNumber: "asc" },
+        include: {
+          days: {
+            orderBy: { order: "asc" },
+            include: {
+              exercises: {
+                orderBy: { order: "asc" },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+}
+
+export async function appendTrainingDayToPlan(params: {
+  userId: string;
+  trainingPlanId: string;
+  nextDay: NextTrainingDayDraft;
+}) {
+  const { userId, trainingPlanId, nextDay } = params;
+
+  const plan = await prisma.trainingPlan.findFirst({
+    where: {
+      id: trainingPlanId,
+      userId,
+    },
+    include: {
+      weeks: {
+        orderBy: { weekNumber: "asc" },
+        include: {
+          days: {
+            orderBy: { order: "asc" },
+          },
+        },
+      },
+    },
+  });
+
+  if (!plan) {
+    throw new Error("Training plan not found");
+  }
+
+  const lastWeek = plan.weeks.at(-1);
+  const expectedDaysPerWeek = plan.weeks[0]?.days.length || 7;
+  const targetWeek =
+    lastWeek && lastWeek.days.length < expectedDaysPerWeek
+      ? lastWeek
+      : await prisma.trainingWeek.create({
+          data: {
+            planId: plan.id,
+            weekNumber: (lastWeek?.weekNumber ?? 0) + 1,
+            title: `Week ${(lastWeek?.weekNumber ?? 0) + 1}`,
+            summary: "Generated continuation from the AI coach.",
+          },
+        });
+
+  const createdDay = await prisma.trainingDay.create({
+    data: {
+      weekId: targetWeek.id,
+      order: targetWeek.days.length,
+      dayLabel: nextDay.dayLabel,
+      title: nextDay.title,
+      summary: nextDay.summary,
+      estimatedDurationMinutes: nextDay.estimatedDurationMinutes,
+    },
+  });
+
+  for (const [index, exercise] of nextDay.exercises.entries()) {
+    await prisma.trainingDayExercise.create({
+      data: {
+        dayId: createdDay.id,
+        order: index,
+        name: exercise.name,
+        normalizedName: exercise.normalizedName,
+        sets: exercise.sets,
+        repMin: exercise.repMin,
+        repMax: exercise.repMax,
+        restSeconds: exercise.restSeconds,
+        targetRpe: exercise.targetRpe,
+        rir: exercise.rir,
+        notes: exercise.notes,
+        warmup: exercise.warmup ?? false,
+        exerciseType: exercise.exerciseType,
+        muscleGroups: exercise.muscleGroups ?? [],
+        equipment: exercise.equipment ?? [],
+        substitutions: exercise.substitutions ?? [],
+      },
+    });
+  }
+
+  const existingThread = await prisma.planThread.findFirst({
+    where: {
+      userId,
+      planId: plan.id,
+      scope: "PLAN",
+    },
+    select: { id: true },
+  });
+
+  if (existingThread) {
+    await prisma.planThread.update({
+      where: { id: existingThread.id },
+      data: {
+        updatedAt: new Date(),
+      },
+    });
+  } else {
+    await prisma.planThread.create({
+      data: {
+        userId,
+        planId: plan.id,
+        scope: "PLAN",
+        title: plan.title,
+      },
+    });
+  }
+
+  return prisma.trainingPlan.findUniqueOrThrow({
+    where: { id: plan.id },
+    include: {
+      weeks: {
+        orderBy: { weekNumber: "asc" },
+        include: {
+          days: {
+            orderBy: { order: "asc" },
+            include: {
+              exercises: {
+                orderBy: { order: "asc" },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
 }
 
 export async function saveRecommendationRefinement(params: {

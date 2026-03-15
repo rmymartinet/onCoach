@@ -1,4 +1,6 @@
 import type {
+  AiWorkspaceClarificationDecision,
+  NextTrainingDayDraft,
   NoteImportSegmentation,
   ParsedWorkoutCollection,
   RecommendationDraft,
@@ -40,6 +42,56 @@ export type AiContextWorkout = {
   performedAt: string | null;
   createdAt: string;
   exercises: unknown[];
+};
+
+export type AiContextTrainingPlanExercise = {
+  id: string;
+  order: number;
+  name: string;
+  normalizedName?: string | null;
+  sets: number;
+  repMin: number;
+  repMax: number;
+  restSeconds: number;
+  notes?: string | null;
+  warmup?: boolean;
+  exerciseType?: string | null;
+  muscleGroups?: string[];
+  equipment?: string[];
+  substitutions?: string[];
+};
+
+export type AiContextTrainingPlanDay = {
+  id: string;
+  order: number;
+  dayLabel: string;
+  title: string;
+  summary?: string | null;
+  estimatedDurationMinutes?: number | null;
+  exercises: AiContextTrainingPlanExercise[];
+};
+
+export type AiContextTrainingPlanWeek = {
+  id: string;
+  weekNumber: number;
+  title: string;
+  summary?: string | null;
+  days: AiContextTrainingPlanDay[];
+};
+
+export type AiContextTrainingPlan = {
+  id: string;
+  title: string;
+  goal?: string | null;
+  level?: string | null;
+  summary?: string | null;
+  split?: string | null;
+  status: string;
+  source: string;
+  progressionNotes?: string[];
+  createdAt: string;
+  updatedAt: string;
+  weeks: AiContextTrainingPlanWeek[];
 };
 
 export type WorkoutDetailApiExercise = {
@@ -142,6 +194,22 @@ export function parseWorkoutNote(rawText: string) {
   }>("/api/ai/parse-workout-note", { rawText });
 }
 
+export function analyzeAiWorkspace(payload: {
+  mode: "import_note" | "paste_workout" | "generate_from_scratch";
+  sourceText?: string;
+  messages?: { role: "assistant" | "user"; text: string }[];
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  trainingPlan?: unknown;
+  clarificationRound?: number;
+}) {
+  return postJson<{
+    ok: true;
+    model: string;
+    decision: AiWorkspaceClarificationDecision;
+  }>("/api/ai/analyze-workspace", payload);
+}
+
 export function generateNextWorkout(payload: {
   userProfile?: unknown;
   recentWorkouts?: unknown;
@@ -161,14 +229,40 @@ export function generateNextWorkout(payload: {
 export function generateTrainingPlan(payload: {
   userProfile?: unknown;
   recentWorkouts?: unknown;
+  currentTrainingPlan?: unknown;
+  currentTrainingPlanId?: string;
+  userMessage?: string;
 }) {
   return postJson<{
     ok: true;
     model: string;
     trainingPlan: TrainingPlanDraft;
     trainingPlanId: string;
-    threadId: string;
+    threadId: string | null;
   }>("/api/ai/generate-training-plan", payload);
+}
+
+export function updateTrainingPlan(payload: {
+  trainingPlanId: string;
+  trainingPlan: TrainingPlanDraft;
+}) {
+  return postJson<{
+    ok: true;
+    trainingPlanId: string;
+  }>("/api/update-training-plan", payload);
+}
+
+export function generateNextTrainingDay(payload: {
+  trainingPlan: unknown;
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  userMessage?: string;
+}) {
+  return postJson<{
+    ok: true;
+    model: string;
+    nextDay: NextTrainingDayDraft;
+  }>("/api/ai/generate-next-training-day", payload);
 }
 
 export function refineWorkout(payload: {
@@ -221,6 +315,23 @@ export function getWorkout(workoutId: string) {
   }>("/api/get-workout", { workoutId });
 }
 
+export function getTrainingPlan(trainingPlanId: string) {
+  return postJson<{
+    ok: true;
+    trainingPlan: AiContextTrainingPlan;
+  }>("/api/get-training-plan", { trainingPlanId });
+}
+
+export function appendTrainingPlanDay(payload: {
+  trainingPlanId: string;
+  nextDay: NextTrainingDayDraft;
+}) {
+  return postJson<{
+    ok: true;
+    trainingPlanId: string;
+  }>("/api/append-training-plan-day", payload);
+}
+
 export function updateWorkoutExercise(payload: {
   exerciseId: string;
   workoutId: string;
@@ -245,6 +356,7 @@ export function getAiContext() {
     ok: true;
     user: AiContextUser | null;
     recentWorkouts: AiContextWorkout[];
+    trainingPlans: AiContextTrainingPlan[];
     latestRecommendation: RecommendationDraft | null;
     latestWorkoutId: string | null;
     latestRecommendationId: string | null;

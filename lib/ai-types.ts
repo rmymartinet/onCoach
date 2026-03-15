@@ -59,6 +59,8 @@ export type TrainingPlanDay = {
   exercises: RecommendationExerciseDraft[];
 };
 
+export type NextTrainingDayDraft = TrainingPlanDay;
+
 export type TrainingPlanWeek = {
   weekNumber: number;
   title: string;
@@ -106,4 +108,12 @@ export type NoteImportSegmentation = {
 export type ParsedWorkoutCollection = {
   summary?: string;
   sessions: ParsedWorkout[];
+};
+
+export type AiWorkspaceClarificationDecision = {
+  type: "clarify" | "ready";
+  mode: "import_note" | "paste_workout" | "generate_from_scratch";
+  assistantMessage: string;
+  questions?: string[];
+  missingFields?: string[];
 };

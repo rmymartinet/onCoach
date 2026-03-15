@@ -47,6 +47,27 @@ export async function GET(request: Request) {
     },
   });
 
+  const trainingPlans = await prisma.trainingPlan.findMany({
+    where: { userId: session.user.id },
+    orderBy: { updatedAt: "desc" },
+    take: 12,
+    include: {
+      weeks: {
+        orderBy: { weekNumber: "asc" },
+        include: {
+          days: {
+            orderBy: { order: "asc" },
+            include: {
+              exercises: {
+                orderBy: { order: "asc" },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
   const latestRecommendation = await prisma.recommendation.findFirst({
     where: { userId: session.user.id },
     orderBy: { updatedAt: "desc" },
@@ -88,6 +109,49 @@ export async function GET(request: Request) {
         restSeconds: exercise.restSeconds,
         notes: exercise.notes,
         order: exercise.order,
+      })),
+    })),
+    trainingPlans: trainingPlans.map((plan) => ({
+      id: plan.id,
+      title: plan.title,
+      goal: plan.goal,
+      level: plan.level,
+      summary: plan.summary,
+      split: plan.split,
+      status: plan.status,
+      source: plan.source,
+      progressionNotes: Array.isArray(plan.progressionNotes) ? plan.progressionNotes : [],
+      createdAt: plan.createdAt,
+      updatedAt: plan.updatedAt,
+      weeks: plan.weeks.map((week) => ({
+        id: week.id,
+        weekNumber: week.weekNumber,
+        title: week.title,
+        summary: week.summary,
+        days: week.days.map((day) => ({
+          id: day.id,
+          order: day.order,
+          dayLabel: day.dayLabel,
+          title: day.title,
+          summary: day.summary,
+          estimatedDurationMinutes: day.estimatedDurationMinutes,
+          exercises: day.exercises.map((exercise) => ({
+            id: exercise.id,
+            order: exercise.order,
+            name: exercise.name,
+            normalizedName: exercise.normalizedName,
+            sets: exercise.sets,
+            repMin: exercise.repMin,
+            repMax: exercise.repMax,
+            restSeconds: exercise.restSeconds,
+            notes: exercise.notes,
+            warmup: exercise.warmup,
+            exerciseType: exercise.exerciseType,
+            muscleGroups: Array.isArray(exercise.muscleGroups) ? exercise.muscleGroups : [],
+            equipment: Array.isArray(exercise.equipment) ? exercise.equipment : [],
+            substitutions: Array.isArray(exercise.substitutions) ? exercise.substitutions : [],
+          })),
+        })),
       })),
     })),
     latestRecommendation: latestRecommendation

@@ -1,5 +1,7 @@
 import type {
+  AiWorkspaceClarificationDecision,
   CoachAction,
+  NextTrainingDayDraft,
   NoteImportSegmentation,
   NoteWorkoutCandidate,
   ParsedWorkout,
@@ -28,6 +30,11 @@ type TrainingPlanResult = {
   model: string;
 };
 
+type NextTrainingDayResult = {
+  nextDay: NextTrainingDayDraft;
+  model: string;
+};
+
 type RefineRecommendationResult = {
   refinement: RefineWorkoutResponse;
   model: string;
@@ -40,6 +47,11 @@ type SegmentNoteImportResult = {
 
 type ParseWorkoutCollectionResult = {
   parsedCollection: ParsedWorkoutCollection;
+  model: string;
+};
+
+type WorkspaceDecisionResult = {
+  decision: AiWorkspaceClarificationDecision;
   model: string;
 };
 
@@ -77,6 +89,71 @@ type InferredExerciseData = {
   method?: string;
   repMode?: "standard" | "failure";
 };
+
+function inferMethodExtrasFromText(value: string, method?: string) {
+  const raw = value.trim();
+  const lower = raw.toLowerCase();
+  const extra: Record<string, string> = {};
+
+  if (method === "Drop set") {
+    const weights = [...raw.matchAll(/(\d+(?:[.,]\d+)?)\s*(kg|kgs|lb|lbs)?/gi)]
+      .map((match) => match[1]?.replace(",", "."))
+      .filter((entry): entry is string => Boolean(entry));
+    if (weights.length >= 2) {
+      extra.dropWeights = weights.join("|");
+    }
+  }
+
+  if (method === "Rest-pause") {
+    const pauseMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:s|sec|secs|second|seconds|secondes?|min|mins|minute|minutes)\b/);
+    const miniSetMatch = lower.match(/(\d+)\s*(?:mini[- ]?sets?|clusters?|rounds?)/);
+    if (pauseMatch?.[1]) {
+      const pauseValue = Number(pauseMatch[1].replace(",", "."));
+      if (Number.isFinite(pauseValue)) {
+        extra.restPauseSeconds = lower.includes("min")
+          ? `${Math.round(pauseValue * 60)}`
+          : `${Math.round(pauseValue)}`;
+      }
+    }
+    if (miniSetMatch?.[1]) {
+      extra.restPauseMiniSets = miniSetMatch[1];
+    }
+  }
+
+  if (method === "Myo-reps") {
+    const activationMatch = lower.match(/activation\s*(\d+)/);
+    const miniMatch = lower.match(/mini\s*(?:reps?)?\s*(\d+)/);
+    const roundsMatch = lower.match(/(\d+)\s*rounds?/);
+    const restMatch = lower.match(/(\d+(?:[.,]\d+)?)\s*(?:s|sec|secs|second|seconds|secondes?)\b/);
+    if (activationMatch?.[1]) extra.myoActivationReps = activationMatch[1];
+    if (miniMatch?.[1]) extra.myoMiniReps = miniMatch[1];
+    if (roundsMatch?.[1]) extra.myoRounds = roundsMatch[1];
+    if (restMatch?.[1]) extra.myoRestSeconds = `${Math.round(Number(restMatch[1].replace(",", ".")))}`;
+  }
+
+  if (method === "Tempo") {
+    const tempoMatch = raw.match(/\b(\d)\s*[-/]\s*(\d)\s*[-/]\s*(\d)\s*[-/]\s*(\d)\b/);
+    if (tempoMatch) {
+      extra.tempoEccentric = tempoMatch[1];
+      extra.tempoStretch = tempoMatch[2];
+      extra.tempoConcentric = tempoMatch[3];
+      extra.tempoTop = tempoMatch[4];
+    }
+  }
+
+  if (method === "Custom" && /(giant set|triset|tri-set|cluster|circuit)/.test(lower)) {
+    const customName = lower.includes("giant set")
+      ? "Giant set"
+      : lower.includes("triset") || lower.includes("tri-set")
+        ? "Triset"
+        : lower.includes("cluster")
+          ? "Cluster"
+          : "Circuit";
+    extra.customName = customName;
+  }
+
+  return extra;
+}
 
 function inferTargetAreaFromText(value: string) {
   const raw = value.toLowerCase();
@@ -291,6 +368,12 @@ function normalizeRecommendationExercise(
   const repMin = asOptionalNumber(record.repMin);
   const repMax = asOptionalNumber(record.repMax);
   const restSeconds = asOptionalNumber(record.restSeconds);
+  const notes = asOptionalString(record.notes);
+  const sourceText = [name, asOptionalString(record.normalizedName), notes].filter(Boolean).join(" ");
+  const inferred = inferExerciseDataFromText(sourceText);
+  const targetArea = inferTargetAreaFromText(sourceText);
+  const method = inferred.method ?? detectMethodFromText(sourceText);
+  const methodExtras = inferMethodExtrasFromText(sourceText, method);
 
   if (
     !name ||
@@ -312,7 +395,12 @@ function normalizeRecommendationExercise(
     restSeconds,
     targetRpe: asOptionalNumber(record.targetRpe),
     rir: asOptionalNumber(record.rir),
-    notes: asOptionalString(record.notes),
+    notes: buildNotesWithMetadata(notes, {
+      targetArea,
+      method,
+      repMode: inferred.repMode,
+      extra: methodExtras,
+    }),
     warmup: typeof record.warmup === "boolean" ? record.warmup : undefined,
     exerciseType: asOptionalString(record.exerciseType),
     muscleGroups: Array.isArray(record.muscleGroups)
@@ -495,16 +583,73 @@ function normalizeTrainingPlanDay(
     return null;
   }
 
+  const normalizedExercises = normalizePlanExerciseRelationships(exercises);
+
   return {
     dayLabel,
     title,
     summary: asOptionalString(record.summary),
     estimatedDurationMinutes: asOptionalNumber(record.estimatedDurationMinutes),
-    exercises: exercises.map((exercise, exerciseIndex) => ({
+    exercises: normalizedExercises.map((exercise, exerciseIndex) => ({
       ...exercise,
       order: exerciseIndex,
     })),
   };
+}
+
+function normalizePlanExerciseRelationships(
+  exercises: RecommendationExerciseDraft[],
+) {
+  return exercises.map((exercise, index, list) => {
+    const parsed = splitNotesMetadata(exercise.notes);
+    const method = parsed.metadata.method ?? detectMethodFromText(exercise.notes ?? "");
+    const nextExercise = list[index + 1];
+
+    if (method !== "Superset" || !nextExercise) {
+      return exercise;
+    }
+
+    const pairName =
+      parsed.metadata.extra?.pairName?.trim() || nextExercise.name.trim();
+
+    const nextParsed = splitNotesMetadata(nextExercise.notes);
+    const nextMethod =
+      nextParsed.metadata.method ?? detectMethodFromText(nextExercise.notes ?? "");
+
+    if (nextMethod !== "Superset") {
+      nextExercise.notes = buildNotesWithMetadata(nextExercise.notes, {
+        method: "Superset",
+        extra: {
+          pairName: exercise.name.trim(),
+        },
+      });
+    } else if (!nextParsed.metadata.extra?.pairName?.trim()) {
+      nextExercise.notes = buildNotesWithMetadata(nextExercise.notes, {
+        extra: {
+          pairName: exercise.name.trim(),
+        },
+      });
+    }
+
+    return {
+      ...exercise,
+      notes: buildNotesWithMetadata(exercise.notes, {
+        method: "Superset",
+        extra: {
+          pairName,
+        },
+      }),
+    };
+  });
+}
+
+export function validateTrainingPlanDay(input: unknown): TrainingPlanDay {
+  const day = normalizeTrainingPlanDay(input, 0);
+  if (!day) {
+    throw new Error("Training plan day must include a label, title, and exercises");
+  }
+
+  return day;
 }
 
 function normalizeTrainingPlanWeek(
@@ -534,6 +679,192 @@ function normalizeTrainingPlanWeek(
     title,
     summary: asOptionalString(record.summary),
     days,
+  };
+}
+
+function parseCountToken(value: string) {
+  const normalized = value.toLowerCase();
+  const dictionary: Record<string, number> = {
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    un: 1,
+    une: 1,
+    deux: 2,
+    trois: 3,
+    quatre: 4,
+    cinq: 5,
+    six_fr: 6,
+  };
+  return dictionary[normalized === "six" ? "six" : normalized] ?? null;
+}
+
+function extractRequestedWeekCount(userMessage?: string) {
+  const raw = userMessage?.toLowerCase() ?? "";
+  const match = raw.match(/\b(\d+|one|two|three|four|five|six|un|une|deux|trois|quatre|cinq|six)\s*(?:week|weeks|semaine|semaines)\b/);
+  if (!match?.[1]) return null;
+  return parseCountToken(match[1]);
+}
+
+function extractRequestedDayCount(userMessage?: string) {
+  const raw = userMessage?.toLowerCase() ?? "";
+  const match = raw.match(/\b(\d+|one|two|three|four|five|six|un|une|deux|trois|quatre|cinq|six)\s*(?:day|days|jour|jours|session|sessions|workout|workouts)\b/);
+  if (!match?.[1]) return null;
+  return parseCountToken(match[1]);
+}
+
+function sanitizeTrainingPlanStructure(
+  plan: TrainingPlanDraft,
+  userMessage?: string,
+) {
+  const requestedWeeks = extractRequestedWeekCount(userMessage);
+  const requestedDays = extractRequestedDayCount(userMessage);
+
+  let weeks = plan.weeks;
+
+  if (requestedWeeks && requestedWeeks > 0) {
+    weeks = weeks.slice(0, requestedWeeks);
+  } else if (requestedDays && requestedDays > 0) {
+    weeks = weeks.slice(0, 1);
+  }
+
+  if (requestedDays && requestedDays > 0) {
+    weeks = weeks.map((week) => ({
+      ...week,
+      days: week.days.slice(0, requestedDays).map((day, index) => ({
+        ...day,
+        exercises: day.exercises.map((exercise, exerciseIndex) => ({
+          ...exercise,
+          order: exerciseIndex,
+        })),
+      })),
+    }));
+  }
+
+  return {
+    ...plan,
+    weeks: weeks.map((week, index) => ({
+      ...week,
+      weekNumber: index + 1,
+      days: week.days,
+    })),
+  };
+}
+
+function userExplicitlyWantsMethodsEverywhere(userMessage?: string) {
+  const raw = userMessage?.toLowerCase() ?? "";
+  return /(all exercises|every exercise|each exercise|partout|tous les exercices|chaque exercice)/.test(raw);
+}
+
+function exerciseLooksLikeHeavyCompound(name: string) {
+  const raw = name.toLowerCase();
+  return /(squat|deadlift|bench press|barbell row|overhead press|military press|hack squat|leg press|romanian deadlift|pull-up|pull up|chin-up|chin up|dip\b)/.test(
+    raw,
+  );
+}
+
+function stripAdvancedMethodMetadata(notes?: string) {
+  const parsed = splitNotesMetadata(notes);
+  return buildNotesWithMetadata(parsed.freeform || undefined, {
+    targetArea: parsed.metadata.targetArea,
+    repMode: parsed.metadata.repMode,
+    method: "Standard",
+    extra: {
+      timelineDate: parsed.metadata.extra?.timelineDate ?? "",
+      timelineWeek: parsed.metadata.extra?.timelineWeek ?? "",
+      timelineMonth: parsed.metadata.extra?.timelineMonth ?? "",
+    },
+  });
+}
+
+function sanitizeTrainingPlanAdvancedMethods(
+  plan: TrainingPlanDraft,
+  userMessage?: string,
+) {
+  if (userExplicitlyWantsMethodsEverywhere(userMessage)) {
+    return plan;
+  }
+
+  return {
+    ...plan,
+    weeks: plan.weeks.map((week) => ({
+      ...week,
+      days: week.days.map((day) => {
+        const maxAdvancedSlots = Math.max(1, Math.min(3, Math.floor(day.exercises.length / 3) || 1));
+        let usedAdvancedSlots = 0;
+
+        const sanitizedExercises = day.exercises.map((exercise, index, list) => {
+          const parsed = splitNotesMetadata(exercise.notes);
+          const method = parsed.metadata.method ?? detectMethodFromText(exercise.notes ?? "");
+
+          if (!method || method === "Standard") {
+            return exercise;
+          }
+
+          const heavyCompound = exerciseLooksLikeHeavyCompound(exercise.name);
+          const nextExercise = list[index + 1];
+
+          if (method === "Superset") {
+            if (heavyCompound || usedAdvancedSlots >= maxAdvancedSlots || !nextExercise) {
+              return {
+                ...exercise,
+                notes: stripAdvancedMethodMetadata(exercise.notes),
+              };
+            }
+            usedAdvancedSlots += 1;
+            return exercise;
+          }
+
+          if (heavyCompound || usedAdvancedSlots >= maxAdvancedSlots) {
+            return {
+              ...exercise,
+              notes: stripAdvancedMethodMetadata(exercise.notes),
+            };
+          }
+
+          usedAdvancedSlots += 1;
+          return exercise;
+        });
+
+        const exercises = sanitizedExercises.map((exercise, index, list) => {
+          const parsed = splitNotesMetadata(exercise.notes);
+          const method = parsed.metadata.method ?? detectMethodFromText(exercise.notes ?? "");
+          if (method !== "Superset") {
+            return exercise;
+          }
+
+          const nextExercise = list[index + 1];
+          const nextParsed = splitNotesMetadata(nextExercise?.notes);
+          const nextMethod =
+            nextParsed.metadata.method ?? detectMethodFromText(nextExercise?.notes ?? "");
+          const pairName = parsed.metadata.extra?.pairName?.trim().toLowerCase();
+          const nextName = nextExercise?.name.trim().toLowerCase();
+
+          if (!nextExercise || nextMethod !== "Superset" || !pairName || pairName !== nextName) {
+            return {
+              ...exercise,
+              notes: stripAdvancedMethodMetadata(exercise.notes),
+            };
+          }
+
+          return exercise;
+        });
+
+        return {
+          ...day,
+          exercises,
+        };
+      }),
+    })),
   };
 }
 
@@ -642,6 +973,49 @@ export function validateParsedWorkoutCollection(
   return {
     summary: asOptionalString(record.summary),
     sessions,
+  };
+}
+
+export function validateAiWorkspaceDecision(
+  input: unknown,
+  fallbackMode?: "import_note" | "paste_workout" | "generate_from_scratch",
+): AiWorkspaceClarificationDecision {
+  if (!input || typeof input !== "object") {
+    throw new Error("Workspace decision must be an object");
+  }
+
+  const record = input as Record<string, unknown>;
+  const normalizedType = asOptionalString(record.type)?.toLowerCase().replaceAll("-", "_");
+  const rawMode = asOptionalString(record.mode)?.toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  const normalizedMode =
+    rawMode === "import_note" || rawMode === "paste_workout" || rawMode === "generate_from_scratch"
+      ? rawMode
+      : fallbackMode;
+  const assistantMessage =
+    asOptionalString(record.assistantMessage) ??
+    asOptionalString(record.message) ??
+    asOptionalString(record.assistant_message);
+
+  if (
+    (normalizedType !== "clarify" && normalizedType !== "ready") ||
+    (normalizedMode !== "import_note" &&
+      normalizedMode !== "paste_workout" &&
+      normalizedMode !== "generate_from_scratch") ||
+    !assistantMessage
+  ) {
+    throw new Error("Workspace decision is invalid");
+  }
+
+  return {
+    type: normalizedType,
+    mode: normalizedMode,
+    assistantMessage,
+    questions: Array.isArray(record.questions)
+      ? record.questions.filter((value): value is string => typeof value === "string").slice(0, 3)
+      : undefined,
+    missingFields: Array.isArray(record.missingFields)
+      ? record.missingFields.filter((value): value is string => typeof value === "string").slice(0, 6)
+      : undefined,
   };
 }
 
@@ -1053,14 +1427,36 @@ function buildGenerateWorkoutPrompt(input: {
 function buildGenerateTrainingPlanPrompt(input: {
   userProfile?: unknown;
   recentWorkouts?: unknown;
+  currentTrainingPlan?: unknown;
+  userMessage?: string;
 }) {
   return [
     "You are an AI strength and hypertrophy coach.",
-    "Build an initial 4-week training plan in strict JSON only.",
-    "This is not just one next workout. It is a week-by-week structure with training days inside each week.",
+    input.currentTrainingPlan
+      ? "Refine the user's current training plan in strict JSON only."
+      : "Build an initial training plan in strict JSON only.",
+    "This is a structured training block with weeks and training days when that makes sense.",
+    "Do not force a 4-week plan if the user asked for a shorter horizon like 1 week or only a few training days.",
+    "If the user explicitly asks for a 1-week plan, a 2-day plan, or another short block, honor that exact scope.",
     "Use the user's profile choices to decide split, exercise selection, weekly structure, and progression.",
     "Keep all days realistic for the user's session duration and equipment.",
     "If the user has limitations, avoid conflicting exercises.",
+    "If a current plan is provided, preserve as much structure as possible unless the user context clearly asks for changes.",
+    "When the latest user coaching message asks for concrete changes, you must apply those changes in the returned plan.",
+    "If the user asks for methods like superset, drop set, rest-pause, or tempo, use them selectively and intelligently, not on every exercise by default.",
+    "Advanced methods are tools, not a blanket rule. Use the minimum number of placements needed to improve density, stimulus, or weak-point focus.",
+    "Prefer advanced methods on accessories, isolation, machine work, or end-of-session hypertrophy work.",
+    "Avoid putting advanced methods on heavy primary compounds unless the user explicitly asks for that.",
+    "If the user asks for supersets, prefer a few high-value pairings rather than converting the whole day.",
+    "Method notes must be structured, not vague free text.",
+    "Use notes metadata patterns like:",
+    "- Superset: method=Superset; pairName=Exercise B; pairReps=12 || optional free note",
+    "- Drop set: method=Drop set; dropWeights=90|70|50 || optional free note",
+    "- Rest-pause: method=Rest-pause; restPauseSeconds=20; restPauseMiniSets=3 || optional free note",
+    "- Myo-reps: method=Myo-reps; myoActivationReps=15; myoMiniReps=4; myoRounds=4; myoRestSeconds=20 || optional free note",
+    "- Tempo: method=Tempo; tempoEccentric=3; tempoStretch=1; tempoConcentric=1; tempoTop=0 || optional free note",
+    "- Custom: method=Custom; customName=Giant set; customInstructions=Move exercise to exercise with no rest || optional free note",
+    "When you use Superset, create a real pair of two consecutive exercises and set pairName on both sides when possible.",
     "Return only valid JSON with this shape:",
     JSON.stringify(
       {
@@ -1114,6 +1510,62 @@ function buildGenerateTrainingPlanPrompt(input: {
     JSON.stringify(input.userProfile ?? null),
     "Recent workouts:",
     JSON.stringify(input.recentWorkouts ?? []),
+    "Latest user coaching message:",
+    JSON.stringify(input.userMessage ?? null),
+    "Current training plan:",
+    JSON.stringify(input.currentTrainingPlan ?? null),
+  ].join("\n");
+}
+
+function buildGenerateNextTrainingDayPrompt(input: {
+  trainingPlan: unknown;
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  userMessage?: string;
+}) {
+  return [
+    "You are an AI strength coach continuing an existing structured training plan.",
+    "Generate only the single best next training day in strict JSON.",
+    "You must understand where the user is inside the current plan and extend it coherently.",
+    "Respect the existing split, style, exercise balance, and progression logic already present in the plan.",
+    "Avoid repeating the exact previous day unless the plan structure truly calls for it.",
+    "Use the user's profile, recent workouts, and optional message to adapt volume, duration, and exercise selection.",
+    "If the user asks for a change, apply it while keeping the program coherent.",
+    "Return only valid JSON with this shape:",
+    JSON.stringify(
+      {
+        dayLabel: "Thu",
+        title: "Pull B",
+        summary: "Back-focused day that continues the current block with manageable fatigue.",
+        estimatedDurationMinutes: 50,
+        exercises: [
+          {
+            name: "Chest-Supported Row",
+            normalizedName: "chest supported row",
+            sets: 4,
+            repMin: 8,
+            repMax: 10,
+            restSeconds: 120,
+            targetRpe: 8,
+            notes: "Drive elbows low and control the eccentric.",
+            exerciseType: "compound",
+            muscleGroups: ["back", "lats"],
+            equipment: ["machine"],
+            substitutions: ["Cable Row"],
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "Current training plan:",
+    JSON.stringify(input.trainingPlan ?? null),
+    "User profile:",
+    JSON.stringify(input.userProfile ?? null),
+    "Recent workouts:",
+    JSON.stringify(input.recentWorkouts ?? []),
+    "Latest user coaching message:",
+    JSON.stringify(input.userMessage ?? null),
   ].join("\n");
 }
 
@@ -1234,6 +1686,107 @@ function buildRefineWorkoutPrompt(input: {
   ].join("\n");
 }
 
+function buildAnalyzeWorkspacePrompt(input: {
+  mode: "import_note" | "paste_workout" | "generate_from_scratch";
+  sourceText?: string;
+  messages?: unknown;
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  trainingPlan?: unknown;
+  clarificationRound?: number;
+}) {
+  return [
+    "You are an AI workout coach deciding whether more clarification is needed before generating.",
+    "Return strict JSON only.",
+    "Ask only the smallest number of essential questions that would materially change the output.",
+    "Never ask more than 3 questions.",
+    "Never repeat questions already answered in the conversation or profile.",
+    "If the user says session duration does not matter, is flexible, or they do not care, do not ask about session duration again.",
+    "If enough context exists, return type=ready.",
+    "If clarificationRound is 2 or more, prefer type=ready unless critical safety/program context is missing.",
+    "For generate_from_scratch prioritize frequency, session duration, equipment, limitations, and priority muscles.",
+    "For paste_workout prioritize whether this is one workout or a whole program, desired cleanup vs optimization, and user goal if missing.",
+    "For import_note prioritize whether the note should become multiple sessions or one program, and whether to preserve or optimize structure.",
+    "Return only valid JSON with this shape:",
+    JSON.stringify(
+      {
+        type: "clarify",
+        mode: input.mode,
+        assistantMessage: "Before I build it, I need 2 quick details.",
+        questions: [
+          "How many days per week do you want to train?",
+          "Do you have full gym access or mostly machines/home equipment?",
+        ],
+        missingFields: ["frequencyPerWeek", "equipment"],
+      },
+      null,
+      2,
+    ),
+    "Current mode:",
+    JSON.stringify(input.mode),
+    "Source text:",
+    JSON.stringify(input.sourceText ?? null),
+    "Conversation messages:",
+    JSON.stringify(input.messages ?? []),
+    "User profile:",
+    JSON.stringify(input.userProfile ?? null),
+    "Recent workouts:",
+    JSON.stringify(input.recentWorkouts ?? []),
+    "Current training plan:",
+    JSON.stringify(input.trainingPlan ?? null),
+    "Clarification round:",
+    JSON.stringify(input.clarificationRound ?? 0),
+  ].join("\n");
+}
+
+function conversationSaysDurationIsFlexible(messages: unknown) {
+  if (!Array.isArray(messages)) return false;
+
+  return messages.some((message) => {
+    if (!message || typeof message !== "object") return false;
+    const text = asOptionalString((message as Record<string, unknown>).text)?.toLowerCase();
+    if (!text) return false;
+
+    return (
+      /(no defined time|no specific time|don't care about.*duration|do not care about.*duration|duration doesn't matter|any duration|flexible duration)/.test(
+        text,
+      ) ||
+      /((je m'en fiche|je m’en fiche|peu importe|pas de temps d[ée]fini|pas de dur[ée]e d[ée]finie|la dur[ée]e m'importe peu|la durée m’importe peu)).*(temps|dur[ée]e)?/.test(
+        text,
+      )
+    );
+  });
+}
+
+function removeDurationClarification(
+  decision: AiWorkspaceClarificationDecision,
+) {
+  if (decision.type !== "clarify") {
+    return decision;
+  }
+
+  const nextQuestions = (decision.questions ?? []).filter(
+    (question) => !/duration|minutes|session length|durée|temps/i.test(question),
+  );
+  const nextMissingFields = (decision.missingFields ?? []).filter(
+    (field) => field !== "sessionDuration",
+  );
+
+  if (nextQuestions.length === 0) {
+    return {
+      type: "ready",
+      mode: decision.mode,
+      assistantMessage: "I have enough context to build it.",
+    };
+  }
+
+  return {
+    ...decision,
+    questions: nextQuestions,
+    missingFields: nextMissingFields,
+  };
+}
+
 function buildDirectMultiSessionParsePrompt(rawText: string) {
   return [
     "You are an expert workout-note interpreter.",
@@ -1346,6 +1899,36 @@ export async function parseWorkoutNoteWithOpenAI(
   };
 }
 
+export async function analyzeAiWorkspaceWithOpenAI(input: {
+  mode: "import_note" | "paste_workout" | "generate_from_scratch";
+  sourceText?: string;
+  messages?: unknown;
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  trainingPlan?: unknown;
+  clarificationRound?: number;
+}): Promise<WorkspaceDecisionResult> {
+  const result = await requestJsonFromOpenAI({
+    modelEnvKey: "OPENAI_MODEL_ANALYZE_WORKSPACE",
+    defaultModel: "gpt-4.1-mini",
+    systemPrompt:
+      "You decide whether a workout/program request needs clarification before generation, and you return strict JSON only.",
+    userPrompt: buildAnalyzeWorkspacePrompt(input),
+    temperature: 0.2,
+  });
+
+  const durationIsFlexible = conversationSaysDurationIsFlexible(input.messages);
+
+  return {
+    decision: durationIsFlexible
+      ? removeDurationClarification(
+          validateAiWorkspaceDecision(result.json, input.mode),
+        )
+      : validateAiWorkspaceDecision(result.json, input.mode),
+    model: result.model,
+  };
+}
+
 export async function generateNextWorkoutWithOpenAI(input: {
   userProfile?: unknown;
   recentWorkouts?: unknown;
@@ -1370,6 +1953,8 @@ export async function generateNextWorkoutWithOpenAI(input: {
 export async function generateTrainingPlanWithOpenAI(input: {
   userProfile?: unknown;
   recentWorkouts?: unknown;
+  currentTrainingPlan?: unknown;
+  userMessage?: string;
 }): Promise<TrainingPlanResult> {
   const result = await requestJsonFromOpenAI({
     modelEnvKey: "OPENAI_MODEL_GENERATE_PLAN",
@@ -1381,7 +1966,34 @@ export async function generateTrainingPlanWithOpenAI(input: {
   });
 
   return {
-    trainingPlan: validateTrainingPlanDraft(result.json),
+    trainingPlan: sanitizeTrainingPlanAdvancedMethods(
+      sanitizeTrainingPlanStructure(
+        validateTrainingPlanDraft(result.json),
+        input.userMessage,
+      ),
+      input.userMessage,
+    ),
+    model: result.model,
+  };
+}
+
+export async function generateNextTrainingDayWithOpenAI(input: {
+  trainingPlan: unknown;
+  userProfile?: unknown;
+  recentWorkouts?: unknown;
+  userMessage?: string;
+}): Promise<NextTrainingDayResult> {
+  const result = await requestJsonFromOpenAI({
+    modelEnvKey: "OPENAI_MODEL_GENERATE_NEXT_DAY",
+    defaultModel: "gpt-4.1-mini",
+    systemPrompt:
+      "You generate the next structured training day for an existing training plan in strict JSON.",
+    userPrompt: buildGenerateNextTrainingDayPrompt(input),
+    temperature: 0.4,
+  });
+
+  return {
+    nextDay: validateTrainingPlanDay(result.json),
     model: result.model,
   };
 }

@@ -1,10 +1,13 @@
 import { generateTrainingPlanWithOpenAI } from "@/lib/ai";
-import { createTrainingPlanRecord } from "@/lib/ai-store";
+import { createTrainingPlanRecord, updateTrainingPlanRecord } from "@/lib/ai-store";
 import { getSessionFromRequest } from "@/lib/session";
 
 type GenerateTrainingPlanRequestBody = {
   userProfile?: unknown;
   recentWorkouts?: unknown;
+  currentTrainingPlan?: unknown;
+  currentTrainingPlanId?: string;
+  userMessage?: string;
 };
 
 export async function POST(request: Request) {
@@ -19,20 +22,31 @@ export async function POST(request: Request) {
     const result = await generateTrainingPlanWithOpenAI({
       userProfile: body?.userProfile,
       recentWorkouts: body?.recentWorkouts,
+      currentTrainingPlan: body?.currentTrainingPlan,
+      userMessage: body?.userMessage,
     });
 
-    const persisted = await createTrainingPlanRecord({
-      userId: session.user.id,
-      trainingPlan: result.trainingPlan,
-      source: "AI_GENERATED",
-    });
+    const persisted = body?.currentTrainingPlanId
+      ? {
+          trainingPlan: await updateTrainingPlanRecord({
+            userId: session.user.id,
+            trainingPlanId: body.currentTrainingPlanId,
+            trainingPlan: result.trainingPlan,
+          }),
+          thread: null,
+        }
+      : await createTrainingPlanRecord({
+          userId: session.user.id,
+          trainingPlan: result.trainingPlan,
+          source: "AI_GENERATED",
+        });
 
     return Response.json({
       ok: true,
       model: result.model,
       trainingPlan: result.trainingPlan,
       trainingPlanId: persisted.trainingPlan.id,
-      threadId: persisted.thread.id,
+      threadId: persisted.thread?.id ?? null,
     });
   } catch (error) {
     const message =

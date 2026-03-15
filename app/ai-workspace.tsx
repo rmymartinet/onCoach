@@ -15,18 +15,26 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
 import type {
+  AiWorkspaceClarificationDecision,
+  NextTrainingDayDraft,
   ParsedWorkout,
   ParsedWorkoutCollection,
   ParsedWorkoutExercise,
   TrainingPlanDraft,
 } from "@/lib/ai-types";
 import {
+  analyzeAiWorkspace,
+  appendTrainingPlanDay,
+  type AiContextTrainingPlan,
+  generateNextTrainingDay,
   generateTrainingPlan,
+  getTrainingPlan,
   getAiContext,
   parseNoteDirect,
   parseWorkoutNote,
   saveParsedWorkout,
   toAiUserProfile,
+  updateTrainingPlan,
 } from "@/lib/ai-api";
 
 type WorkspaceMode = "import_note" | "paste_workout" | "generate_from_scratch";
@@ -42,6 +50,7 @@ type ChatMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
+  kind?: "text" | "result";
 };
 type TimelineField = "day" | "week" | "month";
 
@@ -83,7 +92,8 @@ const exerciseMethods: ExerciseMethod[] = [
 
 export default function AiWorkspaceScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ mode?: string }>();
+  const params = useLocalSearchParams<{ mode?: string; trainingPlanId?: string; title?: string }>();
+  const linkedTrainingPlanId = params.trainingPlanId ?? null;
   const [selectedMode, setSelectedMode] = useState<WorkspaceMode | null>(() =>
     normalizeMode(params.mode),
   );
@@ -98,6 +108,8 @@ export default function AiWorkspaceScreen() {
   const [parsedCollection, setParsedCollection] = useState<ParsedWorkoutCollection | null>(null);
   const [trainingPlan, setTrainingPlan] = useState<TrainingPlanDraft | null>(null);
   const [trainingPlanId, setTrainingPlanId] = useState<string | null>(null);
+  const [trainingPlanContext, setTrainingPlanContext] = useState<AiContextTrainingPlan | null>(null);
+  const [nextTrainingDay, setNextTrainingDay] = useState<NextTrainingDayDraft | null>(null);
   const [savedWorkoutId, setSavedWorkoutId] = useState<string | null>(null);
   const [timelinePicker, setTimelinePicker] = useState<{
     exerciseIndex: number;
@@ -105,8 +117,12 @@ export default function AiWorkspaceScreen() {
   } | null>(null);
   const [activeExerciseIndex, setActiveExerciseIndex] = useState<number | null>(null);
   const [selectedScheduleExerciseIndices, setSelectedScheduleExerciseIndices] = useState<number[]>([]);
+  const [activePlanWeekIndex, setActivePlanWeekIndex] = useState<number | null>(null);
+  const [activePlanDayIndex, setActivePlanDayIndex] = useState<number | null>(null);
+  const [activePlanExerciseIndex, setActivePlanExerciseIndex] = useState<number | null>(null);
   const [showSaveTitlePrompt, setShowSaveTitlePrompt] = useState(false);
   const [saveTitleDraft, setSaveTitleDraft] = useState("");
+  const [clarificationRound, setClarificationRound] = useState(0);
   const [loadingAction, setLoadingAction] = useState<"bootstrap" | "run" | "save" | null>("bootstrap");
   const [error, setError] = useState<string | null>(null);
 
@@ -146,24 +162,57 @@ export default function AiWorkspaceScreen() {
   }, [params.mode]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function loadTrainingPlanContext() {
+      if (!linkedTrainingPlanId) {
+        setTrainingPlanContext(null);
+        return;
+      }
+
+      try {
+        const result = await getTrainingPlan(linkedTrainingPlanId);
+        if (cancelled) return;
+        setTrainingPlanContext(result.trainingPlan);
+      } catch (nextError) {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : "Failed to load program context");
+        }
+      }
+    }
+
+    void loadTrainingPlanContext();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [linkedTrainingPlanId]);
+
+  function resetGeneratedState() {
+    setError(null);
+    setParsedWorkout(null);
+    setParsedCollection(null);
+    setTrainingPlan(null);
+    setTrainingPlanId(null);
+    setNextTrainingDay(null);
+    setSavedWorkoutId(null);
+    setTimelinePicker(null);
+    setActiveExerciseIndex(null);
+    setSelectedScheduleExerciseIndices([]);
+    setActivePlanWeekIndex(null);
+    setActivePlanDayIndex(null);
+    setActivePlanExerciseIndex(null);
+    setClarificationRound(0);
+  }
+
+  useEffect(() => {
     if (!selectedMode) {
       setMessages([]);
       return;
     }
 
-    setMessages([
-      {
-        id: "assistant-intro",
-        role: "assistant",
-        text:
-          selectedMode === "import_note"
-            ? "I’m ready to organize this note into a clean plan. If there’s anything important I should know first, add it below."
-            : selectedMode === "paste_workout"
-              ? "I’m ready to clean up this workout and structure it properly. Add context if needed before I do."
-              : "I can build your first plan from your profile. Add any extra context before I generate it.",
-      },
-    ]);
-  }, [selectedMode]);
+    setMessages([]);
+  }, [selectedMode, trainingPlanContext]);
 
   useEffect(() => {
     const timeoutId = setTimeout(() => {
@@ -218,12 +267,14 @@ export default function AiWorkspaceScreen() {
     setError(null);
     setParsedWorkout(null);
     setParsedCollection(null);
-    setTrainingPlan(null);
-    setTrainingPlanId(null);
+    setNextTrainingDay(null);
     setSavedWorkoutId(null);
     setTimelinePicker(null);
     setActiveExerciseIndex(null);
     setSelectedScheduleExerciseIndices([]);
+    setActivePlanWeekIndex(null);
+    setActivePlanDayIndex(null);
+    setActivePlanExerciseIndex(null);
     const draftContext = extraContext.trim();
     const nextMessages =
       draftContext.length > 0
@@ -256,6 +307,42 @@ export default function AiWorkspaceScreen() {
     setLoadingAction("run");
 
     try {
+      let decision: AiWorkspaceClarificationDecision | null = null;
+      try {
+        const analysis = await analyzeAiWorkspace({
+          mode: selectedMode,
+          sourceText: nextSourceText,
+          messages: nextMessages.map((message) => ({
+            role: message.role,
+            text: message.text,
+          })),
+          userProfile,
+          recentWorkouts,
+          trainingPlan: trainingPlan ?? trainingPlanContext ?? undefined,
+          clarificationRound,
+        });
+        decision = analysis.decision as AiWorkspaceClarificationDecision;
+      } catch {
+        decision = null;
+      }
+
+      if (decision?.type === "clarify") {
+        const questionBlock = (decision.questions ?? []).length
+          ? `\n\n${decision.questions!.map((question, index) => `${index + 1}. ${question}`).join("\n")}`
+          : "";
+
+        setMessages((current) => [
+          ...current,
+          {
+            id: `assistant-clarify-${Date.now()}`,
+            role: "assistant",
+            text: `${decision.assistantMessage}${questionBlock}`,
+          },
+        ]);
+        setClarificationRound((current) => current + 1);
+        return;
+      }
+
       if (selectedMode === "import_note") {
         if (!nextSourceText.trim()) {
           throw new Error("Paste the note you want me to organize first.");
@@ -264,13 +351,20 @@ export default function AiWorkspaceScreen() {
         const result = await parseNoteDirect(nextCombinedInput);
         setParsedCollection(result.parsedCollection);
         setMessages((current) => [
-          ...current,
+          ...current.filter((message) => message.kind !== "result"),
           {
-            id: `assistant-${Date.now()}`,
+            id: `assistant-result-${Date.now()}`,
             role: "assistant",
             text: "I organized the note into a cleaner structure. Review it below, then keep chatting if something still needs to change.",
           },
+          {
+            id: `result-${Date.now()}`,
+            role: "assistant",
+            text: "",
+            kind: "result",
+          },
         ]);
+        setClarificationRound(0);
       } else if (selectedMode === "paste_workout") {
         if (!nextSourceText.trim()) {
           throw new Error("Paste the workout you want me to clean up first.");
@@ -280,31 +374,73 @@ export default function AiWorkspaceScreen() {
         const parsed = result.parsedWorkout as ParsedWorkout;
         setParsedWorkout(parsed);
         setMessages((current) => [
-          ...current,
+          ...current.filter((message) => message.kind !== "result"),
           {
             id: `assistant-${Date.now()}`,
             role: "assistant",
             text: "I updated the workout with your context. Review it below. If it looks right, validate it. Otherwise keep talking and I’ll refine it again.",
           },
-        ]);
-      } else {
-        const result = await generateTrainingPlan({
-          userProfile: {
-            ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
-            extraContext: nextUserContext.join("\n") || undefined,
-          },
-          recentWorkouts,
-        });
-        setTrainingPlan(result.trainingPlan);
-        setTrainingPlanId(result.trainingPlanId);
-        setMessages((current) => [
-          ...current,
           {
-            id: `assistant-${Date.now()}`,
+            id: `result-${Date.now()}`,
             role: "assistant",
-            text: "Your first plan is ready. Review it below, validate it if it looks good, or keep chatting if you want changes first.",
+            text: "",
+            kind: "result",
           },
         ]);
+        setClarificationRound(0);
+      } else {
+        if (trainingPlanContext) {
+          const result = await generateNextTrainingDay({
+            trainingPlan: trainingPlanContext,
+            userProfile: {
+              ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
+            },
+            recentWorkouts,
+            userMessage: nextUserContext.join("\n") || undefined,
+          });
+          setNextTrainingDay(result.nextDay);
+          setMessages((current) => [
+            ...current.filter((message) => message.kind !== "result"),
+            {
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              text: "I generated the next training day for this program. Review it below, then add it to the plan or keep refining it in the chat.",
+            },
+            {
+              id: `result-${Date.now()}`,
+              role: "assistant",
+              text: "",
+              kind: "result",
+            },
+          ]);
+        } else {
+          const result = await generateTrainingPlan({
+            userProfile: {
+              ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
+            },
+            recentWorkouts,
+            currentTrainingPlan: trainingPlan ?? undefined,
+            currentTrainingPlanId: trainingPlanId ?? undefined,
+            userMessage: nextUserContext.join("\n") || undefined,
+          });
+          setTrainingPlan(result.trainingPlan);
+          setTrainingPlanId(result.trainingPlanId);
+          setMessages((current) => [
+            ...current.filter((message) => message.kind !== "result"),
+            {
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              text: "Your first plan is ready. Review it below, validate it if it looks good, or keep chatting if you want changes first.",
+            },
+            {
+              id: `result-${Date.now()}`,
+              role: "assistant",
+              text: "",
+              kind: "result",
+            },
+          ]);
+        }
+        setClarificationRound(0);
       }
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to run AI workspace");
@@ -393,6 +529,44 @@ export default function AiWorkspaceScreen() {
     setSavedWorkoutId(null);
   }
 
+  function updateTrainingPlanExercise(
+    weekIndex: number,
+    dayIndex: number,
+    exerciseIndex: number,
+    patch: Partial<ParsedWorkoutExercise>,
+  ) {
+    setTrainingPlan((current) => {
+      if (!current) return current;
+
+      return {
+        ...current,
+        weeks: current.weeks.map((week, currentWeekIndex) => {
+          if (currentWeekIndex !== weekIndex) return week;
+
+          return {
+            ...week,
+            days: week.days.map((day, currentDayIndex) => {
+              if (currentDayIndex !== dayIndex) return day;
+
+              return {
+                ...day,
+                exercises: day.exercises.map((exercise, currentExerciseIndex) => {
+                  if (currentExerciseIndex !== exerciseIndex) return exercise;
+
+                  const next = fromParsedWorkoutExercise(exercise, patch);
+                  return {
+                    ...next,
+                    order: currentExerciseIndex,
+                  };
+                }),
+              };
+            }),
+          };
+        }),
+      };
+    });
+  }
+
   function removeParsedExercise(exerciseIndex: number) {
     setParsedWorkout((current) => {
       if (!current) return current;
@@ -468,17 +642,81 @@ export default function AiWorkspaceScreen() {
   }
 
   function handleValidatePlan() {
-    if (!trainingPlanId) return;
+    if (!trainingPlan) {
+      setError("No plan to save yet.");
+      return;
+    }
 
-    setMessages((current) => [
-      ...current,
-      {
-        id: `assistant-plan-${Date.now()}`,
-        role: "assistant",
-        text: "Plan confirmed. I saved it as your working plan. You can revisit it from the app and keep refining it later.",
-      },
-    ]);
-    router.push("/home");
+    if (!trainingPlanId) {
+      setError("This plan is missing its saved id. Generate it again before validating.");
+      return;
+    }
+
+    setLoadingAction("save");
+    setError(null);
+
+    updateTrainingPlan({
+      trainingPlanId,
+      trainingPlan,
+    })
+      .then((result) => {
+        setMessages((current) => [
+          ...current,
+          {
+            id: `assistant-plan-${Date.now()}`,
+            role: "assistant",
+            text: "Plan confirmed. I saved it as your working plan. You can revisit it from the app and keep refining it later.",
+          },
+        ]);
+        router.push({
+          pathname: "/program-detail",
+          params: {
+            trainingPlanId: result.trainingPlanId,
+            title: trainingPlan.blockTitle ?? "Program",
+          },
+        });
+      })
+      .catch((nextError) => {
+        setError(nextError instanceof Error ? nextError.message : "Failed to save plan");
+      })
+      .finally(() => {
+        setLoadingAction(null);
+      });
+  }
+
+  async function handleValidateNextTrainingDay() {
+    if (!linkedTrainingPlanId || !nextTrainingDay) return;
+
+    setLoadingAction("save");
+    setError(null);
+
+    try {
+      await appendTrainingPlanDay({
+        trainingPlanId: linkedTrainingPlanId,
+        nextDay: nextTrainingDay,
+      });
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: `assistant-next-day-${Date.now()}`,
+          role: "assistant",
+          text: "The next day is now part of your program. You can review it in the program detail screen.",
+        },
+      ]);
+
+      router.replace({
+        pathname: "/program-detail",
+        params: {
+          trainingPlanId: linkedTrainingPlanId,
+          title: trainingPlanContext?.title ?? params.title ?? "Program",
+        },
+      });
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to add this day to the program");
+    } finally {
+      setLoadingAction(null);
+    }
   }
 
   const isBusy = loadingAction !== null;
@@ -500,6 +738,424 @@ export default function AiWorkspaceScreen() {
       scheduledExercisesCount === parsedWorkout.exercises.length
     : true;
   const showConversation = selectedMode !== null;
+  const activePlanWeek =
+    trainingPlan && activePlanWeekIndex !== null ? trainingPlan.weeks[activePlanWeekIndex] ?? null : null;
+  const activePlanDay =
+    activePlanWeek && activePlanDayIndex !== null ? activePlanWeek.days[activePlanDayIndex] ?? null : null;
+  const activePlanDayExercises = useMemo(
+    () => (activePlanDay ? activePlanDay.exercises.map((exercise) => toParsedWorkoutExercise(exercise)) : []),
+    [activePlanDay],
+  );
+  const activePlanExerciseGroups = useMemo(
+    () => buildExerciseGroups(activePlanDayExercises),
+    [activePlanDayExercises],
+  );
+  const activePlanExercise =
+    activePlanDay && activePlanExerciseIndex !== null
+      ? activePlanDay.exercises[activePlanExerciseIndex] ?? null
+      : null;
+  const inlineResult = showConversation && (parsedCollection || parsedWorkout || trainingPlan || nextTrainingDay) ? (
+    <>
+      {parsedCollection ? (
+        <View style={styles.resultCard}>
+          <Text style={styles.resultEyebrow}>Organized plan</Text>
+          <Text style={styles.resultTitle}>{parsedCollection.summary ?? "Structured sessions"}</Text>
+          <View style={styles.resultList}>
+            {parsedCollection.sessions.map((session, index) => (
+              <View key={`${session.title ?? "session"}-${index}`} style={styles.resultItem}>
+                <Text style={styles.resultItemTitle}>{session.title ?? `Session ${index + 1}`}</Text>
+                <Text style={styles.resultItemMeta}>{session.exercises.length} exercises</Text>
+              </View>
+            ))}
+          </View>
+          <Text style={styles.resultHint}>If some relationships are still wrong, keep chatting and I’ll reorganize it again.</Text>
+        </View>
+      ) : null}
+
+      {parsedWorkout ? (
+        <View style={styles.resultCard}>
+          <Text style={styles.resultEyebrow}>Clean workout</Text>
+          <Text style={styles.resultTitle}>{parsedWorkout.title ?? "Parsed workout"}</Text>
+          <View style={styles.resultList}>
+            {groupedExercises.map((group, groupIndex) => (
+              <View key={`group-${groupIndex}`} style={styles.exerciseGroupWrap}>
+                {group.type === "single" ? (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.resultItem,
+                      activeExerciseIndex === group.exerciseIndex && styles.resultItemActive,
+                      selectedScheduleExerciseIndices.includes(group.exerciseIndex) && styles.resultItemDragPending,
+                      pressed && styles.pressed,
+                    ]}
+                    onPress={() =>
+                      setActiveExerciseIndex((current) =>
+                        current === group.exerciseIndex ? null : group.exerciseIndex,
+                      )
+                    }
+                  >
+                    <ExerciseCardContent
+                      exercise={group.exercise}
+                      selected={selectedScheduleExerciseIndices.includes(group.exerciseIndex)}
+                      onToggleSelect={() => toggleScheduleSelection(group.exerciseIndex)}
+                      onOpenTimelinePicker={(field) =>
+                        setTimelinePicker({
+                          exerciseIndex: group.exerciseIndex,
+                          field,
+                        })
+                      }
+                    />
+                    <Pressable
+                      style={styles.exerciseDeleteInline}
+                      onPress={() => removeParsedExercise(group.exerciseIndex)}
+                    >
+                      <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
+                    </Pressable>
+                    <Text style={styles.exerciseChevron}>›</Text>
+                  </Pressable>
+                ) : (
+                  <View style={styles.linkedExerciseGroup}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.resultItem,
+                        styles.linkedExerciseItem,
+                        activeExerciseIndex === group.firstIndex && styles.resultItemActive,
+                        selectedScheduleExerciseIndices.includes(group.firstIndex) && styles.resultItemDragPending,
+                        pressed && styles.pressed,
+                      ]}
+                      onPress={() =>
+                        setActiveExerciseIndex((current) =>
+                          current === group.firstIndex ? null : group.firstIndex,
+                        )
+                      }
+                    >
+                      <ExerciseCardContent
+                        exercise={group.first}
+                        selected={selectedScheduleExerciseIndices.includes(group.firstIndex)}
+                        onToggleSelect={() => toggleScheduleSelection(group.firstIndex)}
+                        onOpenTimelinePicker={(field) =>
+                          setTimelinePicker({
+                            exerciseIndex: group.firstIndex,
+                            field,
+                          })
+                        }
+                      />
+                      <Pressable
+                        style={styles.exerciseDeleteInline}
+                        onPress={() => removeParsedExercise(group.firstIndex)}
+                      >
+                        <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
+                      </Pressable>
+                      <Text style={styles.exerciseChevron}>›</Text>
+                    </Pressable>
+                    <View style={styles.groupConnector}>
+                      <View style={styles.groupConnectorLine} />
+                      <View style={styles.groupMethodBadge}>
+                        <Text style={styles.groupMethodBadgeText}>{group.label}</Text>
+                      </View>
+                      <View style={styles.groupConnectorLine} />
+                    </View>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.resultItem,
+                        styles.linkedExerciseItem,
+                        activeExerciseIndex === group.secondIndex && styles.resultItemActive,
+                        selectedScheduleExerciseIndices.includes(group.secondIndex) && styles.resultItemDragPending,
+                        pressed && styles.pressed,
+                      ]}
+                      onPress={() =>
+                        setActiveExerciseIndex((current) =>
+                          current === group.secondIndex ? null : group.secondIndex,
+                        )
+                      }
+                    >
+                      <ExerciseCardContent
+                        exercise={group.second}
+                        selected={selectedScheduleExerciseIndices.includes(group.secondIndex)}
+                        onToggleSelect={() => toggleScheduleSelection(group.secondIndex)}
+                        onOpenTimelinePicker={(field) =>
+                          setTimelinePicker({
+                            exerciseIndex: group.secondIndex,
+                            field,
+                          })
+                        }
+                      />
+                      <Pressable
+                        style={styles.exerciseDeleteInline}
+                        onPress={() => removeParsedExercise(group.secondIndex)}
+                      >
+                        <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
+                      </Pressable>
+                      <Text style={styles.exerciseChevron}>›</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            ))}
+          </View>
+          <View style={styles.resultActions}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.resultPrimaryAction,
+                (pressed || loadingAction === "save") && styles.pressed,
+                savedWorkoutId && styles.resultPrimaryActionDone,
+                !scheduleIsComplete && styles.resultPrimaryActionDisabled,
+              ]}
+              onPress={handleValidateWorkout}
+              disabled={loadingAction === "save" || Boolean(savedWorkoutId) || !scheduleIsComplete}
+            >
+              {loadingAction === "save" ? (
+                <ActivityIndicator color="#f5f7fa" />
+              ) : (
+                <Text style={styles.resultPrimaryActionText}>
+                  {savedWorkoutId
+                    ? "Saved to app"
+                    : scheduleIsComplete
+                      ? "Validate and add to app"
+                      : "Complete exercise timeline first"}
+                </Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {trainingPlan ? (
+        <View style={styles.resultCard}>
+          <Text style={styles.resultEyebrow}>Generated plan</Text>
+          <Text style={styles.resultTitle}>{trainingPlan.blockTitle}</Text>
+          <Text style={styles.resultBody}>
+            {trainingPlan.summary ?? "A structured first block based on your profile."}
+          </Text>
+          <View style={styles.resultList}>
+            {activePlanWeek === null
+              ? trainingPlan.weeks.map((week, weekIndex) => (
+                  <Pressable
+                    key={week.weekNumber}
+                    style={({ pressed }) => [styles.resultItem, pressed && styles.pressed]}
+                    onPress={() => {
+                      setActivePlanWeekIndex(weekIndex);
+                      setActivePlanDayIndex(null);
+                    }}
+                  >
+                    <View style={styles.planPreviewCopy}>
+                      <Text style={styles.resultItemTitle}>Week {week.weekNumber}</Text>
+                      <Text style={styles.resultItemMeta}>{week.days.length} training days</Text>
+                    </View>
+                    <Text style={styles.exerciseChevron}>›</Text>
+                  </Pressable>
+                ))
+              : activePlanDay === null
+                ? (
+                    <>
+                      <Pressable
+                        style={({ pressed }) => [styles.planPreviewBackRow, pressed && styles.pressed]}
+                        onPress={() => setActivePlanWeekIndex(null)}
+                      >
+                        <Text style={styles.planPreviewBackText}>← Back to weeks</Text>
+                      </Pressable>
+                      <View style={styles.planPreviewHeaderCard}>
+                        <Text style={styles.resultItemTitle}>Week {activePlanWeek.weekNumber}</Text>
+                        <Text style={styles.resultItemMeta}>
+                          {activePlanWeek.summary ?? `${activePlanWeek.days.length} training days`}
+                        </Text>
+                      </View>
+                      {activePlanWeek.days.map((day, dayIndex) => (
+                        <Pressable
+                          key={`${activePlanWeek.weekNumber}-${day.dayLabel}-${dayIndex}`}
+                          style={({ pressed }) => [styles.resultItem, pressed && styles.pressed]}
+                          onPress={() => {
+                            setActivePlanDayIndex(dayIndex);
+                            setActivePlanExerciseIndex(null);
+                          }}
+                        >
+                          <View style={styles.planPreviewCopy}>
+                            <Text style={styles.planPreviewDayTitle}>
+                              {day.dayLabel} · {day.title}
+                            </Text>
+                            <Text style={styles.resultItemMeta}>
+                              {day.exercises.length} exercises
+                              {typeof day.estimatedDurationMinutes === "number"
+                                ? ` · ${day.estimatedDurationMinutes} min`
+                                : ""}
+                            </Text>
+                          </View>
+                          <Text style={styles.exerciseChevron}>›</Text>
+                        </Pressable>
+                      ))}
+                    </>
+                  )
+                : (
+                    <>
+                      <Pressable
+                        style={({ pressed }) => [styles.planPreviewBackRow, pressed && styles.pressed]}
+                        onPress={() => setActivePlanDayIndex(null)}
+                      >
+                        <Text style={styles.planPreviewBackText}>← Back to days</Text>
+                      </Pressable>
+                      <View style={styles.planPreviewHeaderCard}>
+                        <Text style={styles.planPreviewDayTitle}>
+                          {activePlanDay.dayLabel} · {activePlanDay.title}
+                        </Text>
+                        <Text style={styles.resultItemMeta}>
+                          {activePlanDay.summary ??
+                            `${activePlanDay.exercises.length} exercises`}
+                        </Text>
+                      </View>
+                      {activePlanExerciseGroups.map((group, groupIndex) => (
+                        <View key={`plan-group-${groupIndex}`} style={styles.exerciseGroupWrap}>
+                          {group.type === "single" ? (
+                              <Pressable
+                                style={({ pressed }) => [styles.planPreviewExerciseItem, pressed && styles.pressed]}
+                                onPress={() => setActivePlanExerciseIndex(group.exerciseIndex)}
+                              >
+                                <View style={styles.planPreviewCopy}>
+                                  <Text style={styles.planPreviewExerciseName}>{group.exercise.name}</Text>
+                                  <Text style={styles.resultItemMeta}>
+                                    {formatWorkoutVolume(group.exercise)}
+                                    {typeof group.exercise.restSeconds === "number"
+                                      ? ` · rest ${group.exercise.restSeconds}s`
+                                      : ""}
+                                  </Text>
+                                  {buildMethodPreview(parseMethodDraft(group.exercise.notes)) ? (
+                                    <Text style={styles.exerciseSupportText}>
+                                      {buildMethodPreview(parseMethodDraft(group.exercise.notes))}
+                                    </Text>
+                                  ) : null}
+                                </View>
+                                <Text style={styles.exerciseChevron}>›</Text>
+                              </Pressable>
+                          ) : (
+                            <View style={styles.linkedExerciseGroup}>
+                              <Pressable
+                                style={({ pressed }) => [
+                                  styles.planPreviewExerciseItem,
+                                  styles.linkedExerciseItem,
+                                  pressed && styles.pressed,
+                                ]}
+                                onPress={() => setActivePlanExerciseIndex(group.firstIndex)}
+                              >
+                                <View style={styles.planPreviewCopy}>
+                                  <Text style={styles.planPreviewExerciseName}>{group.first.name}</Text>
+                                  <Text style={styles.resultItemMeta}>
+                                    {formatWorkoutVolume(group.first)}
+                                    {typeof group.first.restSeconds === "number"
+                                      ? ` · rest ${group.first.restSeconds}s`
+                                      : ""}
+                                  </Text>
+                                  {buildMethodPreview(parseMethodDraft(group.first.notes)) ? (
+                                    <Text style={styles.exerciseSupportText}>
+                                      {buildMethodPreview(parseMethodDraft(group.first.notes))}
+                                    </Text>
+                                  ) : null}
+                                </View>
+                                <Text style={styles.exerciseChevron}>›</Text>
+                              </Pressable>
+                              <View style={styles.groupConnector}>
+                                <View style={styles.groupConnectorLine} />
+                                <View style={styles.groupMethodBadge}>
+                                  <Text style={styles.groupMethodBadgeText}>{group.label}</Text>
+                                </View>
+                                <View style={styles.groupConnectorLine} />
+                              </View>
+                              <Pressable
+                                style={({ pressed }) => [
+                                  styles.planPreviewExerciseItem,
+                                  styles.linkedExerciseItem,
+                                  pressed && styles.pressed,
+                                ]}
+                                onPress={() => setActivePlanExerciseIndex(group.secondIndex)}
+                              >
+                                <View style={styles.planPreviewCopy}>
+                                  <Text style={styles.planPreviewExerciseName}>{group.second.name}</Text>
+                                  <Text style={styles.resultItemMeta}>
+                                    {formatWorkoutVolume(group.second)}
+                                    {typeof group.second.restSeconds === "number"
+                                      ? ` · rest ${group.second.restSeconds}s`
+                                      : ""}
+                                  </Text>
+                                  {buildMethodPreview(parseMethodDraft(group.second.notes)) ? (
+                                    <Text style={styles.exerciseSupportText}>
+                                      {buildMethodPreview(parseMethodDraft(group.second.notes))}
+                                    </Text>
+                                  ) : null}
+                                </View>
+                                <Text style={styles.exerciseChevron}>›</Text>
+                              </Pressable>
+                            </View>
+                          )}
+                        </View>
+                      ))}
+                    </>
+                  )}
+          </View>
+          <View style={styles.resultActions}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.resultPrimaryAction,
+                (pressed || loadingAction === "save") && styles.pressed,
+                !trainingPlanId && styles.resultPrimaryActionDisabled,
+              ]}
+              onPress={handleValidatePlan}
+              disabled={!trainingPlanId || loadingAction === "save"}
+            >
+              {loadingAction === "save" ? (
+                <ActivityIndicator color="#f5f7fa" />
+              ) : (
+                <Text style={styles.resultPrimaryActionText}>Validate this plan</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {nextTrainingDay ? (
+        <View style={styles.resultCard}>
+          <Text style={styles.resultEyebrow}>Next day</Text>
+          <Text style={styles.resultTitle}>{nextTrainingDay.title}</Text>
+          <Text style={styles.resultBody}>
+            {nextTrainingDay.summary ??
+              "A new training day generated from your current program context."}
+          </Text>
+          <View style={styles.resultList}>
+            <View style={styles.resultItem}>
+              <Text style={styles.resultItemTitle}>{nextTrainingDay.dayLabel}</Text>
+              <Text style={styles.resultItemMeta}>
+                {nextTrainingDay.exercises.length} exercises
+                {typeof nextTrainingDay.estimatedDurationMinutes === "number"
+                  ? ` · ${nextTrainingDay.estimatedDurationMinutes} min`
+                  : ""}
+              </Text>
+            </View>
+            {nextTrainingDay.exercises.map((exercise) => (
+              <View key={`${exercise.order}-${exercise.name}`} style={styles.resultItem}>
+                <Text style={styles.resultItemTitle}>{exercise.name}</Text>
+                <Text style={styles.resultItemMeta}>
+                  {exercise.sets} x {formatRepRange(exercise.repMin, exercise.repMax)} · rest {exercise.restSeconds}s
+                </Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.resultActions}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.resultPrimaryAction,
+                (pressed || loadingAction === "save") && styles.pressed,
+                !linkedTrainingPlanId && styles.resultPrimaryActionDisabled,
+              ]}
+              onPress={handleValidateNextTrainingDay}
+              disabled={!linkedTrainingPlanId || loadingAction === "save"}
+            >
+              {loadingAction === "save" ? (
+                <ActivityIndicator color="#f5f7fa" />
+              ) : (
+                <Text style={styles.resultPrimaryActionText}>Add this day to the program</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+    </>
+  ) : null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -576,15 +1232,7 @@ export default function AiWorkspaceScreen() {
                     setSelectedMode(null);
                     setExtraContext("");
                     setMessages([]);
-                    setError(null);
-                    setParsedWorkout(null);
-                    setParsedCollection(null);
-                    setTrainingPlan(null);
-                    setTrainingPlanId(null);
-                    setSavedWorkoutId(null);
-                    setTimelinePicker(null);
-                    setActiveExerciseIndex(null);
-                    setSelectedScheduleExerciseIndices([]);
+                    resetGeneratedState();
                   }}
                 >
                   <Text style={styles.flowSwitchButtonText}>Change flow</Text>
@@ -620,7 +1268,9 @@ export default function AiWorkspaceScreen() {
                 </Pressable>
               </View>
               <Text style={styles.sourcePreviewText}>
-                I’ll use your onboarding answers as the base context for the plan.
+                {trainingPlanContext
+                  ? `I’ll use ${trainingPlanContext.title} as the working program so I can refine it or extend it with you.`
+                  : "I’ll use your onboarding answers as the base context for the plan."}
               </Text>
             </View>
           )}
@@ -628,217 +1278,29 @@ export default function AiWorkspaceScreen() {
           {showConversation ? (
             <View style={styles.messageList}>
               {messages.map((message) => (
-                <View
-                  key={message.id}
-                  style={[
-                    styles.messageBubble,
-                    message.role === "assistant" ? styles.assistantBubble : styles.userBubble,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.messageText,
-                      message.role === "assistant" ? styles.assistantText : styles.userText,
-                    ]}
-                  >
-                    {message.text}
-                  </Text>
+                <View key={message.id} style={styles.messageList}>
+                  {message.kind === "result" ? (
+                    inlineResult
+                  ) : (
+                    <View
+                      style={[
+                        styles.messageBubble,
+                        message.role === "assistant" ? styles.assistantBubble : styles.userBubble,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.messageText,
+                          message.role === "assistant" ? styles.assistantText : styles.userText,
+                        ]}
+                      >
+                        {message.text}
+                      </Text>
+                    </View>
+                  )}
                 </View>
               ))}
-            </View>
-          ) : null}
-
-          {showConversation && parsedCollection ? (
-            <View style={styles.resultCard}>
-              <Text style={styles.resultEyebrow}>Organized plan</Text>
-              <Text style={styles.resultTitle}>{parsedCollection.summary ?? "Structured sessions"}</Text>
-              <View style={styles.resultList}>
-                {parsedCollection.sessions.map((session, index) => (
-                  <View key={`${session.title ?? "session"}-${index}`} style={styles.resultItem}>
-                    <Text style={styles.resultItemTitle}>{session.title ?? `Session ${index + 1}`}</Text>
-                    <Text style={styles.resultItemMeta}>{session.exercises.length} exercises</Text>
-                  </View>
-                ))}
-              </View>
-              <Text style={styles.resultHint}>If some relationships are still wrong, keep chatting and I’ll reorganize it again.</Text>
-            </View>
-          ) : null}
-
-          {showConversation && parsedWorkout ? (
-            <View style={styles.resultCard}>
-              <Text style={styles.resultEyebrow}>Clean workout</Text>
-              <Text style={styles.resultTitle}>{parsedWorkout.title ?? "Parsed workout"}</Text>
-              <View style={styles.resultList}>
-                {groupedExercises.map((group, groupIndex) => (
-                  <View key={`group-${groupIndex}`} style={styles.exerciseGroupWrap}>
-                    {group.type === "single" ? (
-                      <Pressable
-                        style={({ pressed }) => [
-                          styles.resultItem,
-                          activeExerciseIndex === group.exerciseIndex && styles.resultItemActive,
-                          selectedScheduleExerciseIndices.includes(group.exerciseIndex) && styles.resultItemDragPending,
-                          pressed && styles.pressed,
-                        ]}
-                        onPress={() =>
-                          setActiveExerciseIndex((current) =>
-                            current === group.exerciseIndex ? null : group.exerciseIndex,
-                          )
-                        }
-                      >
-                        <ExerciseCardContent
-                          exercise={group.exercise}
-                          selected={selectedScheduleExerciseIndices.includes(group.exerciseIndex)}
-                          onToggleSelect={() => toggleScheduleSelection(group.exerciseIndex)}
-                          onOpenTimelinePicker={(field) =>
-                            setTimelinePicker({
-                              exerciseIndex: group.exerciseIndex,
-                              field,
-                            })
-                          }
-                        />
-                        <Pressable
-                          style={styles.exerciseDeleteInline}
-                          onPress={() => removeParsedExercise(group.exerciseIndex)}
-                        >
-                          <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
-                        </Pressable>
-                        <Text style={styles.exerciseChevron}>›</Text>
-                      </Pressable>
-                    ) : (
-                      <View style={styles.linkedExerciseGroup}>
-                        <Pressable
-                          style={({ pressed }) => [
-                            styles.resultItem,
-                            styles.linkedExerciseItem,
-                            activeExerciseIndex === group.firstIndex && styles.resultItemActive,
-                            selectedScheduleExerciseIndices.includes(group.firstIndex) && styles.resultItemDragPending,
-                            pressed && styles.pressed,
-                          ]}
-                          onPress={() =>
-                            setActiveExerciseIndex((current) =>
-                              current === group.firstIndex ? null : group.firstIndex,
-                            )
-                          }
-                        >
-                          <ExerciseCardContent
-                            exercise={group.first}
-                            selected={selectedScheduleExerciseIndices.includes(group.firstIndex)}
-                            onToggleSelect={() => toggleScheduleSelection(group.firstIndex)}
-                            onOpenTimelinePicker={(field) =>
-                              setTimelinePicker({
-                                exerciseIndex: group.firstIndex,
-                                field,
-                              })
-                            }
-                          />
-                          <Pressable
-                            style={styles.exerciseDeleteInline}
-                            onPress={() => removeParsedExercise(group.firstIndex)}
-                          >
-                            <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
-                          </Pressable>
-                          <Text style={styles.exerciseChevron}>›</Text>
-                        </Pressable>
-                        <View style={styles.groupConnector}>
-                          <View style={styles.groupConnectorLine} />
-                          <View style={styles.groupMethodBadge}>
-                            <Text style={styles.groupMethodBadgeText}>{group.label}</Text>
-                          </View>
-                          <View style={styles.groupConnectorLine} />
-                        </View>
-                        <Pressable
-                          style={({ pressed }) => [
-                            styles.resultItem,
-                            styles.linkedExerciseItem,
-                            activeExerciseIndex === group.secondIndex && styles.resultItemActive,
-                            selectedScheduleExerciseIndices.includes(group.secondIndex) && styles.resultItemDragPending,
-                            pressed && styles.pressed,
-                          ]}
-                          onPress={() =>
-                            setActiveExerciseIndex((current) =>
-                              current === group.secondIndex ? null : group.secondIndex,
-                            )
-                          }
-                        >
-                          <ExerciseCardContent
-                            exercise={group.second}
-                            selected={selectedScheduleExerciseIndices.includes(group.secondIndex)}
-                            onToggleSelect={() => toggleScheduleSelection(group.secondIndex)}
-                            onOpenTimelinePicker={(field) =>
-                              setTimelinePicker({
-                                exerciseIndex: group.secondIndex,
-                                field,
-                              })
-                            }
-                          />
-                          <Pressable
-                            style={styles.exerciseDeleteInline}
-                            onPress={() => removeParsedExercise(group.secondIndex)}
-                          >
-                            <MaterialCommunityIcons name="trash-can-outline" size={16} color="#b24a3d" />
-                          </Pressable>
-                          <Text style={styles.exerciseChevron}>›</Text>
-                        </Pressable>
-                      </View>
-                    )}
-                  </View>
-                ))}
-              </View>
-              <View style={styles.resultActions}>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.resultPrimaryAction,
-                    (pressed || loadingAction === "save") && styles.pressed,
-                    savedWorkoutId && styles.resultPrimaryActionDone,
-                    !scheduleIsComplete && styles.resultPrimaryActionDisabled,
-                  ]}
-                  onPress={handleValidateWorkout}
-                  disabled={loadingAction === "save" || Boolean(savedWorkoutId) || !scheduleIsComplete}
-                >
-                  {loadingAction === "save" ? (
-                    <ActivityIndicator color="#f5f7fa" />
-                  ) : (
-                    <Text style={styles.resultPrimaryActionText}>
-                      {savedWorkoutId
-                        ? "Saved to app"
-                        : scheduleIsComplete
-                          ? "Validate and add to app"
-                          : "Complete exercise timeline first"}
-                    </Text>
-                  )}
-                </Pressable>
-              </View>
-            </View>
-          ) : null}
-
-          {showConversation && trainingPlan ? (
-            <View style={styles.resultCard}>
-              <Text style={styles.resultEyebrow}>Generated plan</Text>
-              <Text style={styles.resultTitle}>{trainingPlan.blockTitle}</Text>
-              <Text style={styles.resultBody}>
-                {trainingPlan.summary ?? "A structured first block based on your profile."}
-              </Text>
-              <View style={styles.resultList}>
-                {trainingPlan.weeks.map((week) => (
-                  <View key={week.weekNumber} style={styles.resultItem}>
-                    <Text style={styles.resultItemTitle}>Week {week.weekNumber}</Text>
-                    <Text style={styles.resultItemMeta}>{week.days.length} training days</Text>
-                  </View>
-                ))}
-              </View>
-              <View style={styles.resultActions}>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.resultPrimaryAction,
-                    pressed && styles.pressed,
-                    !trainingPlanId && styles.resultPrimaryActionDisabled,
-                  ]}
-                  onPress={handleValidatePlan}
-                  disabled={!trainingPlanId}
-                >
-                  <Text style={styles.resultPrimaryActionText}>Validate this plan</Text>
-                </Pressable>
-              </View>
+              {!messages.length ? inlineResult : null}
             </View>
           ) : null}
 
@@ -847,6 +1309,7 @@ export default function AiWorkspaceScreen() {
               <Text style={styles.errorText}>{error}</Text>
             </View>
           ) : null}
+
         </ScrollView>
 
         {showConversation ? (
@@ -927,6 +1390,42 @@ export default function AiWorkspaceScreen() {
                     activeExerciseIndex,
                   )}
                   onChange={(patch) => updateParsedExercise(activeExerciseIndex, patch)}
+                />
+              </ScrollView>
+            </View>
+          </View>
+        ) : null}
+
+        {showConversation && activePlanExercise && trainingPlan && activePlanWeekIndex !== null && activePlanDayIndex !== null ? (
+          <View style={styles.exerciseDetailOverlay}>
+            <View style={styles.exerciseDetailShell}>
+              <View style={styles.exerciseDetailHeader}>
+                <Pressable style={[styles.exerciseDetailBack, styles.planDetailBackStrong]} onPress={() => setActivePlanExerciseIndex(null)}>
+                  <Text style={styles.exerciseDetailBackText}>←</Text>
+                </Pressable>
+                <Text style={styles.exerciseDetailHeaderTitle}>Review exercise</Text>
+                <View style={styles.exerciseDetailHeaderSpacer} />
+              </View>
+
+              <ScrollView
+                contentContainerStyle={styles.exerciseDetailContent}
+                showsVerticalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+              >
+                <ExerciseEditorCard
+                  exercise={toParsedWorkoutExercise(activePlanExercise)}
+                  linkedExerciseName={resolveLinkedExerciseName(
+                    activePlanExerciseGroups,
+                    activePlanExerciseIndex!,
+                  )}
+                  onChange={(patch) =>
+                    updateTrainingPlanExercise(
+                      activePlanWeekIndex,
+                      activePlanDayIndex,
+                      activePlanExerciseIndex!,
+                      patch,
+                    )
+                  }
                 />
               </ScrollView>
             </View>
@@ -1567,6 +2066,36 @@ function formatSavedWorkoutDay(value?: string | null) {
   });
 }
 
+function toParsedWorkoutExercise(exercise: TrainingPlanDraft["weeks"][number]["days"][number]["exercises"][number]): ParsedWorkoutExercise {
+  return {
+    name: exercise.name,
+    normalizedName: exercise.normalizedName ?? undefined,
+    sets: exercise.sets,
+    reps: exercise.repMin === exercise.repMax ? exercise.repMin : undefined,
+    repMin: exercise.repMin,
+    repMax: exercise.repMax,
+    restSeconds: exercise.restSeconds,
+    notes: exercise.notes ?? undefined,
+    order: exercise.order,
+  };
+}
+
+function fromParsedWorkoutExercise(
+  current: TrainingPlanDraft["weeks"][number]["days"][number]["exercises"][number],
+  patch: Partial<ParsedWorkoutExercise>,
+) {
+  return {
+    ...current,
+    name: patch.name ?? current.name,
+    normalizedName: patch.normalizedName ?? current.normalizedName,
+    sets: patch.sets ?? current.sets,
+    repMin: patch.repMin ?? patch.reps ?? current.repMin,
+    repMax: patch.repMax ?? patch.reps ?? current.repMax,
+    restSeconds: patch.restSeconds ?? current.restSeconds,
+    notes: patch.notes ?? current.notes,
+  };
+}
+
 function inferMethodLabel(notes?: string) {
   const method = parseMethodDraft(notes).method;
   return method === "Standard" ? null : method;
@@ -2172,6 +2701,54 @@ const styles = StyleSheet.create({
   resultList: {
     gap: 8,
   },
+  planPreviewCopy: {
+    flex: 1,
+    gap: 2,
+  },
+  planPreviewBackRow: {
+    alignSelf: "flex-start",
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#ddd3d5",
+    backgroundColor: "#fff7f6",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  planPreviewBackText: {
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#252a33",
+    fontWeight: "700",
+  },
+  planPreviewHeaderCard: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#f0ece5",
+    backgroundColor: "#fffaf7",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  planPreviewDayTitle: {
+    fontFamily: Fonts.sans,
+    ...Typography.body,
+    color: "#171b22",
+    fontWeight: "700",
+  },
+  planPreviewExerciseItem: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#f0ece5",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 2,
+  },
+  planPreviewExerciseName: {
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#161a22",
+    fontWeight: "700",
+  },
   exerciseGroupWrap: {
     gap: 8,
   },
@@ -2647,6 +3224,10 @@ const styles = StyleSheet.create({
     backgroundColor: "#f3f4f6",
     alignItems: "center",
     justifyContent: "center",
+  },
+  planDetailBackStrong: {
+    borderColor: "#cfc5c8",
+    backgroundColor: "#fffaf7",
   },
   exerciseDetailBackText: {
     fontFamily: Fonts.sans,

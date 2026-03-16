@@ -14,6 +14,11 @@ import type {
   TrainingPlanDraft,
   TrainingPlanWeek,
 } from "@/lib/ai-types";
+import {
+  extractRequestedDayCount,
+  extractRollingSplitConfig,
+  extractRequestedWeekCount,
+} from "@/lib/program-coach-logic";
 
 type ParseWorkoutResult = {
   parsedWorkout: ParsedWorkout;
@@ -138,6 +143,11 @@ function inferMethodExtrasFromText(value: string, method?: string) {
       extra.tempoStretch = tempoMatch[2];
       extra.tempoConcentric = tempoMatch[3];
       extra.tempoTop = tempoMatch[4];
+    } else {
+      extra.tempoEccentric = "3";
+      extra.tempoStretch = "1";
+      extra.tempoConcentric = "1";
+      extra.tempoTop = "0";
     }
   }
 
@@ -579,7 +589,10 @@ function normalizeTrainingPlanDay(
       Boolean(exercise),
     );
 
-  if (exercises.length === 0) {
+  const isRestDay =
+    /rest|recovery|off day|jour de repos|repos/i.test(`${dayLabel} ${title} ${asOptionalString(record.summary) ?? ""}`);
+
+  if (exercises.length === 0 && !isRestDay) {
     return null;
   }
 
@@ -682,52 +695,13 @@ function normalizeTrainingPlanWeek(
   };
 }
 
-function parseCountToken(value: string) {
-  const normalized = value.toLowerCase();
-  const dictionary: Record<string, number> = {
-    "1": 1,
-    "2": 2,
-    "3": 3,
-    "4": 4,
-    "5": 5,
-    "6": 6,
-    one: 1,
-    two: 2,
-    three: 3,
-    four: 4,
-    five: 5,
-    six: 6,
-    un: 1,
-    une: 1,
-    deux: 2,
-    trois: 3,
-    quatre: 4,
-    cinq: 5,
-    six_fr: 6,
-  };
-  return dictionary[normalized === "six" ? "six" : normalized] ?? null;
-}
-
-function extractRequestedWeekCount(userMessage?: string) {
-  const raw = userMessage?.toLowerCase() ?? "";
-  const match = raw.match(/\b(\d+|one|two|three|four|five|six|un|une|deux|trois|quatre|cinq|six)\s*(?:week|weeks|semaine|semaines)\b/);
-  if (!match?.[1]) return null;
-  return parseCountToken(match[1]);
-}
-
-function extractRequestedDayCount(userMessage?: string) {
-  const raw = userMessage?.toLowerCase() ?? "";
-  const match = raw.match(/\b(\d+|one|two|three|four|five|six|un|une|deux|trois|quatre|cinq|six)\s*(?:day|days|jour|jours|session|sessions|workout|workouts)\b/);
-  if (!match?.[1]) return null;
-  return parseCountToken(match[1]);
-}
-
 function sanitizeTrainingPlanStructure(
   plan: TrainingPlanDraft,
   userMessage?: string,
 ) {
   const requestedWeeks = extractRequestedWeekCount(userMessage);
   const requestedDays = extractRequestedDayCount(userMessage);
+  const rollingSplit = extractRollingSplitConfig(userMessage);
 
   let weeks = plan.weeks;
 
@@ -748,6 +722,74 @@ function sanitizeTrainingPlanStructure(
         })),
       })),
     }));
+  }
+
+  if (requestedWeeks && requestedWeeks > 0 && weeks.length > 0 && weeks.length < requestedWeeks) {
+    const seedWeeks = [...weeks];
+    const expandedWeeks = [...weeks];
+
+    while (expandedWeeks.length < requestedWeeks) {
+      const template = seedWeeks[(expandedWeeks.length) % seedWeeks.length];
+      const nextWeekNumber = expandedWeeks.length + 1;
+      expandedWeeks.push({
+        ...template,
+        weekNumber: nextWeekNumber,
+        title: `Week ${nextWeekNumber}`,
+        summary: template.summary ?? `Week ${nextWeekNumber} progression.`,
+        days: template.days.map((day, dayIndex) => ({
+          ...day,
+          title: day.title,
+          summary: day.summary,
+          exercises: day.exercises.map((exercise, exerciseIndex) => ({
+            ...exercise,
+            order: exerciseIndex,
+          })),
+        })),
+      });
+    }
+
+    weeks = expandedWeeks;
+  }
+
+  if (rollingSplit && requestedWeeks && requestedWeeks > 0 && weeks.length > 0) {
+    const trainingTemplates = weeks.flatMap((week) => week.days).filter((day) => day.exercises.length > 0);
+    if (trainingTemplates.length > 0) {
+      const cycle = [
+        ...trainingTemplates.slice(0, rollingSplit.trainingDays),
+        ...Array.from({ length: rollingSplit.restDays }, (_, index) => ({
+          dayLabel: "Rest",
+          title: "Rest day",
+          summary: "Recovery / mobility / walking.",
+          estimatedDurationMinutes: 0,
+          exercises: [],
+        })),
+      ];
+
+      const rebuiltWeeks = Array.from({ length: requestedWeeks }, (_, weekIndex) => {
+        const startCycleIndex = weekIndex * 7;
+        const days = Array.from({ length: 7 }, (_, dayOffset) => {
+          const template = cycle[(startCycleIndex + dayOffset) % cycle.length];
+          return {
+            ...template,
+            title: template.title,
+            summary: template.summary,
+            exercises: template.exercises.map((exercise, exerciseIndex) => ({
+              ...exercise,
+              order: exerciseIndex,
+            })),
+          };
+        });
+
+        return {
+          ...weeks[Math.min(weekIndex, weeks.length - 1)],
+          weekNumber: weekIndex + 1,
+          title: `Week ${weekIndex + 1}`,
+          days,
+        };
+      });
+
+      weeks = rebuiltWeeks;
+    }
   }
 
   return {
@@ -839,6 +881,36 @@ function sanitizeTrainingPlanAdvancedMethods(
           const parsed = splitNotesMetadata(exercise.notes);
           const method = parsed.metadata.method ?? detectMethodFromText(exercise.notes ?? "");
           if (method !== "Superset") {
+            if (method === "Tempo") {
+              const extra = parsed.metadata.extra ?? {};
+              const invalidTempo =
+                !extra.tempoEccentric ||
+                !extra.tempoStretch ||
+                !extra.tempoConcentric ||
+                !extra.tempoTop ||
+                [extra.tempoEccentric, extra.tempoStretch, extra.tempoConcentric, extra.tempoTop].every(
+                  (value) => value === "0",
+                );
+
+              if (invalidTempo) {
+                return {
+                  ...exercise,
+                  notes: buildNotesWithMetadata(exercise.notes, {
+                    method: "Tempo",
+                    targetArea: parsed.metadata.targetArea,
+                    repMode: parsed.metadata.repMode,
+                    extra: {
+                      ...extra,
+                      tempoEccentric: "3",
+                      tempoStretch: "1",
+                      tempoConcentric: "1",
+                      tempoTop: "0",
+                    },
+                  }),
+                };
+              }
+            }
+
             return exercise;
           }
 
@@ -1437,12 +1509,17 @@ function buildGenerateTrainingPlanPrompt(input: {
       : "Build an initial training plan in strict JSON only.",
     "This is a structured training block with weeks and training days when that makes sense.",
     "Do not force a 4-week plan if the user asked for a shorter horizon like 1 week or only a few training days.",
+    "If the user explicitly asks for N weeks, return exactly N week objects in weeks[].",
+    "Do not collapse a multi-week request into a single sample week.",
+    "If the user describes a repeating pattern like '3 trainings, 1 rest day, repeat', model the plan across the requested horizon instead of reducing it to one simple week.",
     "If the user explicitly asks for a 1-week plan, a 2-day plan, or another short block, honor that exact scope.",
     "Use the user's profile choices to decide split, exercise selection, weekly structure, and progression.",
     "Keep all days realistic for the user's session duration and equipment.",
     "If the user has limitations, avoid conflicting exercises.",
     "If a current plan is provided, preserve as much structure as possible unless the user context clearly asks for changes.",
     "When the latest user coaching message asks for concrete changes, you must apply those changes in the returned plan.",
+    "If the current plan includes real execution data, use repeated adjusted or skipped work as a coaching signal.",
+    "Do not overreact to one isolated off session. Adapt the plan mostly when there is a pattern across multiple completed days.",
     "If the user asks for methods like superset, drop set, rest-pause, or tempo, use them selectively and intelligently, not on every exercise by default.",
     "Advanced methods are tools, not a blanket rule. Use the minimum number of placements needed to improve density, stimulus, or weak-point focus.",
     "Prefer advanced methods on accessories, isolation, machine work, or end-of-session hypertrophy work.",
@@ -1512,6 +1589,8 @@ function buildGenerateTrainingPlanPrompt(input: {
     JSON.stringify(input.recentWorkouts ?? []),
     "Latest user coaching message:",
     JSON.stringify(input.userMessage ?? null),
+    "Execution adherence summary:",
+    JSON.stringify(summarizeTrainingPlanExecution(input.currentTrainingPlan)),
     "Current training plan:",
     JSON.stringify(input.currentTrainingPlan ?? null),
   ].join("\n");
@@ -1530,6 +1609,8 @@ function buildGenerateNextTrainingDayPrompt(input: {
     "Respect the existing split, style, exercise balance, and progression logic already present in the plan.",
     "Avoid repeating the exact previous day unless the plan structure truly calls for it.",
     "Use the user's profile, recent workouts, and optional message to adapt volume, duration, and exercise selection.",
+    "If real execution data shows repeated skips or repeated adjustments, factor that into the next day intelligently.",
+    "Do not over-correct because of one single difficult session.",
     "If the user asks for a change, apply it while keeping the program coherent.",
     "Return only valid JSON with this shape:",
     JSON.stringify(
@@ -1566,6 +1647,8 @@ function buildGenerateNextTrainingDayPrompt(input: {
     JSON.stringify(input.recentWorkouts ?? []),
     "Latest user coaching message:",
     JSON.stringify(input.userMessage ?? null),
+    "Execution adherence summary:",
+    JSON.stringify(summarizeTrainingPlanExecution(input.trainingPlan)),
   ].join("\n");
 }
 
@@ -1702,6 +1785,7 @@ function buildAnalyzeWorkspacePrompt(input: {
     "Never ask more than 3 questions.",
     "Never repeat questions already answered in the conversation or profile.",
     "If the user says session duration does not matter, is flexible, or they do not care, do not ask about session duration again.",
+    "If a current training plan is provided with execution data, use that to understand whether the user is talking about refining the plan, responding to adherence issues, or continuing the next day.",
     "If enough context exists, return type=ready.",
     "If clarificationRound is 2 or more, prefer type=ready unless critical safety/program context is missing.",
     "For generate_from_scratch prioritize frequency, session duration, equipment, limitations, and priority muscles.",
@@ -1732,11 +1816,78 @@ function buildAnalyzeWorkspacePrompt(input: {
     JSON.stringify(input.userProfile ?? null),
     "Recent workouts:",
     JSON.stringify(input.recentWorkouts ?? []),
+    "Execution adherence summary:",
+    JSON.stringify(summarizeTrainingPlanExecution(input.trainingPlan)),
     "Current training plan:",
     JSON.stringify(input.trainingPlan ?? null),
     "Clarification round:",
     JSON.stringify(input.clarificationRound ?? 0),
   ].join("\n");
+}
+
+function summarizeTrainingPlanExecution(trainingPlan: unknown) {
+  if (!trainingPlan || typeof trainingPlan !== "object") {
+    return null;
+  }
+
+  const plan = trainingPlan as {
+    weeks?: Array<{
+      days?: Array<{
+        completionStatus?: string | null;
+        exercises?: Array<{ completionStatus?: string | null }>;
+      }>;
+    }>;
+  };
+
+  let trackedDays = 0;
+  let completedDays = 0;
+  let adjustedDays = 0;
+  let skippedDays = 0;
+  let doneExercises = 0;
+  let adjustedExercises = 0;
+  let skippedExercises = 0;
+
+  for (const week of plan.weeks ?? []) {
+    for (const day of week.days ?? []) {
+      const dayStatus = typeof day.completionStatus === "string" ? day.completionStatus : null;
+      if (dayStatus && dayStatus !== "PLANNED") {
+        trackedDays += 1;
+        if (dayStatus === "COMPLETED") completedDays += 1;
+        if (dayStatus === "ADJUSTED") adjustedDays += 1;
+        if (dayStatus === "SKIPPED") skippedDays += 1;
+      }
+
+      for (const exercise of day.exercises ?? []) {
+        const status = typeof exercise.completionStatus === "string" ? exercise.completionStatus : null;
+        if (status === "DONE") doneExercises += 1;
+        if (status === "ADJUSTED") adjustedExercises += 1;
+        if (status === "SKIPPED") skippedExercises += 1;
+      }
+    }
+  }
+
+  const trackedExercises = doneExercises + adjustedExercises + skippedExercises;
+  if (!trackedDays && !trackedExercises) {
+    return null;
+  }
+
+  return {
+    trackedDays,
+    completedDays,
+    adjustedDays,
+    skippedDays,
+    doneExercises,
+    adjustedExercises,
+    skippedExercises,
+    completionRate:
+      trackedExercises > 0
+        ? Math.round(((doneExercises + adjustedExercises) / trackedExercises) * 100)
+        : null,
+    needsAttention:
+      skippedExercises >= 3 ||
+      adjustedExercises >= 4 ||
+      (trackedExercises > 0 && skippedExercises >= doneExercises),
+  };
 }
 
 function conversationSaysDurationIsFlexible(messages: unknown) {
@@ -1960,7 +2111,7 @@ export async function generateTrainingPlanWithOpenAI(input: {
     modelEnvKey: "OPENAI_MODEL_GENERATE_PLAN",
     defaultModel: "gpt-4.1-mini",
     systemPrompt:
-      "You generate structured 4-week training plans in strict JSON.",
+      "You generate structured training plans in strict JSON. Respect the duration and frequency explicitly requested by the user instead of defaulting to 4 weeks.",
     userPrompt: buildGenerateTrainingPlanPrompt(input),
     temperature: 0.4,
   });

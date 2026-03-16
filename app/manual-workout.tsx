@@ -13,8 +13,8 @@ import { useRouter } from "expo-router";
 
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
-import type { ParsedWorkout, ParsedWorkoutExercise, RecommendationDraft } from "@/lib/ai-types";
-import { generateNextWorkout, getAiContext, saveParsedWorkout, toAiUserProfile } from "@/lib/ai-api";
+import type { ParsedWorkout, ParsedWorkoutExercise, RecommendationDraft, TrainingPlanDraft } from "@/lib/ai-types";
+import { createTrainingPlan, generateNextWorkout, getAiContext, toAiUserProfile } from "@/lib/ai-api";
 
 const sessionTypePresets = [
   "Upper",
@@ -99,11 +99,12 @@ export default function ManualWorkoutScreen() {
   const [step, setStep] = useState(0);
   const [sessionTypePreset, setSessionTypePreset] = useState<SessionTypePreset>("Upper");
   const [customSessionType, setCustomSessionType] = useState("");
+  const [programTitle, setProgramTitle] = useState("My program");
   const [title, setTitle] = useState("Upper");
   const [weekLabel, setWeekLabel] = useState("Week 1");
   const [performedAt, setPerformedAt] = useState("");
   const [exercises, setExercises] = useState<ManualExercise[]>(starterExercises);
-  const [latestWorkoutId, setLatestWorkoutId] = useState<string | null>(null);
+  const [trainingPlanId, setTrainingPlanId] = useState<string | null>(null);
   const [recommendation, setRecommendation] = useState<RecommendationDraft | null>(null);
   const [userProfile, setUserProfile] = useState<unknown>(null);
   const [recentWorkouts, setRecentWorkouts] = useState<unknown[]>([]);
@@ -123,7 +124,6 @@ export default function ManualWorkoutScreen() {
 
         setUserProfile(toAiUserProfile(result.user));
         setRecentWorkouts(result.recentWorkouts);
-        setLatestWorkoutId(result.latestWorkoutId);
       } catch (nextError) {
         if (!cancelled) {
           setError(nextError instanceof Error ? nextError.message : "Failed to load context");
@@ -165,6 +165,49 @@ export default function ManualWorkoutScreen() {
         })),
     }),
     [effectiveSessionType, exercises, performedAt, title],
+  );
+
+  const manualTrainingPlan = useMemo<TrainingPlanDraft>(
+    () => ({
+      blockTitle: programTitle.trim() || "My program",
+      goal: typeof userProfile === "object" && userProfile && "goal" in (userProfile as Record<string, unknown>)
+        ? String((userProfile as Record<string, unknown>).goal ?? "")
+        : undefined,
+      summary: `${effectiveSessionType} program built manually.`,
+      split: effectiveSessionType,
+      progressionNotes: [],
+      weeks: [
+        {
+          weekNumber: extractWeekNumber(weekLabel),
+          title: weekLabel.trim() || "Week 1",
+          summary: undefined,
+          days: [
+            {
+              dayLabel: title.trim() || effectiveSessionType,
+              title: title.trim() || effectiveSessionType,
+              summary: performedAt ? `Planned for ${performedAt}` : undefined,
+              estimatedDurationMinutes: undefined,
+              exercises: parsedWorkout.exercises.map((exercise, index) => ({
+                name: exercise.name,
+                normalizedName: exercise.normalizedName,
+                order: index,
+                sets: exercise.sets ?? 3,
+                repMin: exercise.repMin ?? exercise.reps ?? 8,
+                repMax: exercise.repMax ?? exercise.reps ?? 8,
+                restSeconds: exercise.restSeconds ?? 90,
+                notes: exercise.notes,
+                warmup: false,
+                exerciseType: undefined,
+                muscleGroups: [],
+                equipment: [],
+                substitutions: [],
+              })),
+            },
+          ],
+        },
+      ],
+    }),
+    [effectiveSessionType, parsedWorkout.exercises, performedAt, programTitle, title, userProfile, weekLabel],
   );
 
   function updateExercise(exerciseId: string, patch: Partial<ManualExercise>) {
@@ -248,28 +291,34 @@ export default function ManualWorkoutScreen() {
 
   async function handleSaveWorkout() {
     if (!parsedWorkout.exercises.length) {
-      setError("Add at least one exercise before saving this session.");
+      setError("Add at least one exercise before saving this program.");
       return;
     }
 
     setError(null);
     setLoadingAction("save");
     try {
-      const result = await saveParsedWorkout({
-        rawText: [weekLabel, effectiveSessionType, ...parsedWorkout.exercises.map((exercise) => exercise.rawLine ?? exercise.name)].join("\n"),
-        parsedWorkout,
+      const result = await createTrainingPlan({
+        trainingPlan: manualTrainingPlan,
       });
-      setLatestWorkoutId(result.workoutId);
+      setTrainingPlanId(result.trainingPlanId);
+      router.push({
+        pathname: "/program-detail",
+        params: {
+          trainingPlanId: result.trainingPlanId,
+          title: manualTrainingPlan.blockTitle,
+        },
+      });
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Failed to save workout");
+      setError(nextError instanceof Error ? nextError.message : "Failed to save program");
     } finally {
       setLoadingAction(null);
     }
   }
 
   async function handleGenerateWorkout() {
-    if (!latestWorkoutId && !parsedWorkout.exercises.length) {
-      setError("Finish the workout first before generating the next one.");
+    if (!parsedWorkout.exercises.length) {
+      setError("Finish the first day first before generating the next one.");
       return;
     }
 
@@ -281,7 +330,7 @@ export default function ManualWorkoutScreen() {
         recentWorkouts,
         latestWorkout: parsedWorkout,
         constraints: { availableMinutes: 45 },
-        basedOnWorkoutId: latestWorkoutId ?? undefined,
+        basedOnWorkoutId: undefined,
       });
       setRecommendation(result.recommendation);
     } catch (nextError) {
@@ -319,10 +368,10 @@ export default function ManualWorkoutScreen() {
 
           <Text style={styles.stepTitle}>Step {step + 1} of 3</Text>
           <Text style={styles.stepBody}>
-            {step === 0 && "Choose the session type and basic context."}
+            {step === 0 && "Choose the program title, day type, and basic context."}
             {step === 1 &&
               "Add the exercises. Sets and reps stay on steppers, but load and rest are typed directly for faster editing."}
-            {step === 2 && "Review the workout, save it, then generate the next one."}
+            {step === 2 && "Review the first day, save the program, then generate the next workout if needed."}
           </Text>
 
           {step === 0 ? (
@@ -342,6 +391,15 @@ export default function ManualWorkoutScreen() {
 
               {sessionTypePreset === "Custom" ? (
                 <>
+                  <Text style={styles.fieldLabel}>Program title</Text>
+                  <TextInput
+                    value={programTitle}
+                    onChangeText={setProgramTitle}
+                    style={styles.input}
+                    placeholder="Upper / Lower Block"
+                    placeholderTextColor="#9ea3ac"
+                  />
+
                   <Text style={styles.fieldLabel}>Custom type</Text>
                   <TextInput
                     value={customSessionType}
@@ -353,7 +411,20 @@ export default function ManualWorkoutScreen() {
                 </>
               ) : null}
 
-              <Text style={styles.fieldLabel}>Title</Text>
+              {sessionTypePreset !== "Custom" ? (
+                <>
+                  <Text style={styles.fieldLabel}>Program title</Text>
+                  <TextInput
+                    value={programTitle}
+                    onChangeText={setProgramTitle}
+                    style={styles.input}
+                    placeholder="Upper / Lower Block"
+                    placeholderTextColor="#9ea3ac"
+                  />
+                </>
+              ) : null}
+
+              <Text style={styles.fieldLabel}>Day title</Text>
               <TextInput
                 value={title}
                 onChangeText={setTitle}
@@ -363,7 +434,7 @@ export default function ManualWorkoutScreen() {
               />
 
               <Text style={styles.fieldHint}>
-                Use a base split above, then rename the title freely if you want something more specific.
+                Give the program a real title, then name this day however you want.
               </Text>
 
               <Text style={styles.fieldLabel}>Week</Text>
@@ -798,9 +869,9 @@ export default function ManualWorkoutScreen() {
           {step === 2 ? (
             <>
               <View style={styles.card}>
-                <Text style={styles.reviewTitle}>{parsedWorkout.title}</Text>
+                <Text style={styles.reviewTitle}>{manualTrainingPlan.blockTitle}</Text>
                 <Text style={styles.reviewBody}>
-                  {weekLabel} · {effectiveSessionType}
+                  {weekLabel} · {title}
                   {performedAt ? ` · ${performedAt}` : ""}
                 </Text>
                 <View style={styles.exerciseList}>
@@ -827,7 +898,7 @@ export default function ManualWorkoutScreen() {
                   {loadingAction === "save" ? (
                     <ActivityIndicator color="#f4f6f9" />
                   ) : (
-                    <Text style={styles.primaryButtonText}>Save this workout</Text>
+                    <Text style={styles.primaryButtonText}>Save this program</Text>
                   )}
                 </Pressable>
                 <Pressable
@@ -952,6 +1023,13 @@ function buildExerciseRawLine(exercise: ManualExercise) {
   const base = `${exercise.name} ${exercise.sets}x${exercise.reps}`;
 
   return methodNote ? `${base} · ${methodNote}` : base;
+}
+
+function extractWeekNumber(value: string) {
+  const match = value.match(/(\d+)/);
+  if (!match?.[1]) return 1;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
 }
 
 function parseDecimalInput(value: string) {

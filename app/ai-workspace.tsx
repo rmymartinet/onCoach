@@ -14,6 +14,12 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 
 import { Fonts } from "@/constants/theme";
 import { Typography } from "@/constants/typography";
+import {
+  appendProgramDayContext,
+  resolveProgramDayReference,
+  shouldGenerateNextDay,
+  shouldRefineExistingProgram,
+} from "@/lib/program-coach-logic";
 import type {
   AiWorkspaceClarificationDecision,
   NextTrainingDayDraft,
@@ -53,6 +59,15 @@ type ChatMessage = {
   kind?: "text" | "result";
 };
 type TimelineField = "day" | "week" | "month";
+type ProgramDaySelectionOption = {
+  id: string;
+  label: string;
+  weekIndex: number;
+  dayIndex: number;
+  weekNumber: number;
+  dayLabel: string;
+  dayTitle: string;
+};
 
 type MethodDraft = {
   method: ExerciseMethod;
@@ -110,6 +125,11 @@ export default function AiWorkspaceScreen() {
   const [trainingPlanId, setTrainingPlanId] = useState<string | null>(null);
   const [trainingPlanContext, setTrainingPlanContext] = useState<AiContextTrainingPlan | null>(null);
   const [nextTrainingDay, setNextTrainingDay] = useState<NextTrainingDayDraft | null>(null);
+  const [selectedProgramDay, setSelectedProgramDay] = useState<ProgramDaySelectionOption | null>(null);
+  const [pendingProgramDaySelection, setPendingProgramDaySelection] = useState<{
+    requestText: string;
+    options: ProgramDaySelectionOption[];
+  } | null>(null);
   const [savedWorkoutId, setSavedWorkoutId] = useState<string | null>(null);
   const [timelinePicker, setTimelinePicker] = useState<{
     exerciseIndex: number;
@@ -195,6 +215,8 @@ export default function AiWorkspaceScreen() {
     setTrainingPlan(null);
     setTrainingPlanId(null);
     setNextTrainingDay(null);
+    setSelectedProgramDay(null);
+    setPendingProgramDaySelection(null);
     setSavedWorkoutId(null);
     setTimelinePicker(null);
     setActiveExerciseIndex(null);
@@ -212,7 +234,7 @@ export default function AiWorkspaceScreen() {
     }
 
     setMessages([]);
-  }, [selectedMode, trainingPlanContext]);
+  }, [selectedMode]);
 
   useEffect(() => {
     const timeoutId = setTimeout(() => {
@@ -299,6 +321,7 @@ export default function AiWorkspaceScreen() {
         ? nextUserContext
         : nextUserContext.slice(1);
     const nextCombinedInput = buildCombinedInput(nextSourceText, nextExtraContext);
+    const nextConversationMessages = nextMessages.filter((message) => message.kind !== "result");
 
     if (draftContext.length > 0) {
       setMessages(nextMessages);
@@ -307,6 +330,58 @@ export default function AiWorkspaceScreen() {
     setLoadingAction("run");
 
     try {
+      let latestTrainingPlanContext = trainingPlanContext;
+      if (linkedTrainingPlanId) {
+        try {
+          const latestProgram = await getTrainingPlan(linkedTrainingPlanId);
+          latestTrainingPlanContext = latestProgram.trainingPlan;
+          setTrainingPlanContext(latestProgram.trainingPlan);
+        } catch {
+          latestTrainingPlanContext = trainingPlanContext;
+        }
+      }
+
+      const latestUserRequest = nextUserContext[nextUserContext.length - 1] ?? "";
+      const selectionResolution = resolveProgramDayReference(
+        latestUserRequest,
+        latestTrainingPlanContext,
+        selectedProgramDay,
+      );
+
+      if (selectionResolution?.type === "needs_selection") {
+        setPendingProgramDaySelection({
+          requestText: latestUserRequest,
+          options: selectionResolution.options,
+        });
+        setMessages([
+          ...nextConversationMessages,
+          {
+            id: `assistant-select-${Date.now()}`,
+            role: "assistant",
+            text: "I’m not fully sure which training day you mean. Pick the workout you want me to use.",
+          },
+        ]);
+        return;
+      }
+
+      const resolvedProgramDay =
+        selectionResolution?.type === "selected"
+          ? selectionResolution.option
+          : selectedProgramDay;
+      if (selectionResolution?.type === "selected") {
+        setSelectedProgramDay(selectionResolution.option);
+      }
+      setPendingProgramDaySelection(null);
+
+      const scopedCombinedInput = appendProgramDayContext(
+        nextCombinedInput,
+        resolvedProgramDay,
+      );
+      const scopedUserMessage = appendProgramDayContext(
+        nextUserContext.join("\n") || undefined,
+        resolvedProgramDay,
+      );
+
       let decision: AiWorkspaceClarificationDecision | null = null;
       try {
         const analysis = await analyzeAiWorkspace({
@@ -318,7 +393,7 @@ export default function AiWorkspaceScreen() {
           })),
           userProfile,
           recentWorkouts,
-          trainingPlan: trainingPlan ?? trainingPlanContext ?? undefined,
+          trainingPlan: trainingPlan ?? latestTrainingPlanContext ?? undefined,
           clarificationRound,
         });
         decision = analysis.decision as AiWorkspaceClarificationDecision;
@@ -331,8 +406,8 @@ export default function AiWorkspaceScreen() {
           ? `\n\n${decision.questions!.map((question, index) => `${index + 1}. ${question}`).join("\n")}`
           : "";
 
-        setMessages((current) => [
-          ...current,
+        setMessages([
+          ...nextConversationMessages,
           {
             id: `assistant-clarify-${Date.now()}`,
             role: "assistant",
@@ -348,10 +423,10 @@ export default function AiWorkspaceScreen() {
           throw new Error("Paste the note you want me to organize first.");
         }
 
-        const result = await parseNoteDirect(nextCombinedInput);
+        const result = await parseNoteDirect(scopedCombinedInput);
         setParsedCollection(result.parsedCollection);
-        setMessages((current) => [
-          ...current.filter((message) => message.kind !== "result"),
+        setMessages([
+          ...nextConversationMessages,
           {
             id: `assistant-result-${Date.now()}`,
             role: "assistant",
@@ -370,11 +445,11 @@ export default function AiWorkspaceScreen() {
           throw new Error("Paste the workout you want me to clean up first.");
         }
 
-        const result = await parseWorkoutNote(nextCombinedInput);
+        const result = await parseWorkoutNote(scopedCombinedInput);
         const parsed = result.parsedWorkout as ParsedWorkout;
         setParsedWorkout(parsed);
-        setMessages((current) => [
-          ...current.filter((message) => message.kind !== "result"),
+        setMessages([
+          ...nextConversationMessages,
           {
             id: `assistant-${Date.now()}`,
             role: "assistant",
@@ -389,30 +464,60 @@ export default function AiWorkspaceScreen() {
         ]);
         setClarificationRound(0);
       } else {
-        if (trainingPlanContext) {
-          const result = await generateNextTrainingDay({
-            trainingPlan: trainingPlanContext,
-            userProfile: {
-              ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
-            },
-            recentWorkouts,
-            userMessage: nextUserContext.join("\n") || undefined,
-          });
-          setNextTrainingDay(result.nextDay);
-          setMessages((current) => [
-            ...current.filter((message) => message.kind !== "result"),
-            {
-              id: `assistant-${Date.now()}`,
-              role: "assistant",
-              text: "I generated the next training day for this program. Review it below, then add it to the plan or keep refining it in the chat.",
-            },
-            {
-              id: `result-${Date.now()}`,
-              role: "assistant",
-              text: "",
-              kind: "result",
-            },
-          ]);
+        if (latestTrainingPlanContext) {
+          if (!shouldGenerateNextDay(scopedUserMessage)) {
+            const result = await generateTrainingPlan({
+              userProfile: {
+                ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
+              },
+              recentWorkouts,
+              currentTrainingPlan: trainingPlan ?? latestTrainingPlanContext,
+              currentTrainingPlanId: linkedTrainingPlanId ?? trainingPlanId ?? undefined,
+              userMessage: scopedUserMessage,
+            });
+            setTrainingPlan(result.trainingPlan);
+            setTrainingPlanId(result.trainingPlanId);
+            setMessages([
+              ...nextConversationMessages,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant",
+                text: resolvedProgramDay
+                  ? "I updated the selected training day inside your program. Review the revised plan below."
+                  : "I updated your program with the latest change. Review it below and keep refining if needed.",
+              },
+              {
+                id: `result-${Date.now()}`,
+                role: "assistant",
+                text: "",
+                kind: "result",
+              },
+            ]);
+          } else {
+            const result = await generateNextTrainingDay({
+              trainingPlan: latestTrainingPlanContext,
+              userProfile: {
+                ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
+              },
+              recentWorkouts,
+              userMessage: scopedUserMessage,
+            });
+            setNextTrainingDay(result.nextDay);
+            setMessages([
+              ...nextConversationMessages,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant",
+                text: "I generated the next training day for this program. Review it below, then add it to the plan or keep refining it in the chat.",
+              },
+              {
+                id: `result-${Date.now()}`,
+                role: "assistant",
+                text: "",
+                kind: "result",
+              },
+            ]);
+          }
         } else {
           const result = await generateTrainingPlan({
             userProfile: {
@@ -421,12 +526,12 @@ export default function AiWorkspaceScreen() {
             recentWorkouts,
             currentTrainingPlan: trainingPlan ?? undefined,
             currentTrainingPlanId: trainingPlanId ?? undefined,
-            userMessage: nextUserContext.join("\n") || undefined,
+            userMessage: scopedUserMessage,
           });
           setTrainingPlan(result.trainingPlan);
           setTrainingPlanId(result.trainingPlanId);
-          setMessages((current) => [
-            ...current.filter((message) => message.kind !== "result"),
+          setMessages([
+            ...nextConversationMessages,
             {
               id: `assistant-${Date.now()}`,
               role: "assistant",
@@ -714,6 +819,65 @@ export default function AiWorkspaceScreen() {
       });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Failed to add this day to the program");
+    } finally {
+      setLoadingAction(null);
+    }
+  }
+
+  async function handleSelectProgramDay(option: ProgramDaySelectionOption) {
+    if (!pendingProgramDaySelection) return;
+
+    setSelectedProgramDay(option);
+    setPendingProgramDaySelection(null);
+    setMessages((current) => [
+      ...current,
+      {
+        id: `assistant-select-confirm-${Date.now()}`,
+        role: "assistant",
+        text: `Perfect. I’ll use ${option.label} as the reference for the next change.`,
+      },
+    ]);
+    setLoadingAction("run");
+    setError(null);
+
+    try {
+      const latestProgram = linkedTrainingPlanId
+        ? await getTrainingPlan(linkedTrainingPlanId)
+        : null;
+      const planContext = latestProgram?.trainingPlan ?? trainingPlanContext;
+      if (!planContext) return;
+
+      const result = await generateTrainingPlan({
+        userProfile: {
+          ...(typeof userProfile === "object" && userProfile ? userProfile : {}),
+        },
+        recentWorkouts,
+        currentTrainingPlan: trainingPlan ?? planContext,
+        currentTrainingPlanId: linkedTrainingPlanId ?? trainingPlanId ?? undefined,
+        userMessage: appendProgramDayContext(
+          pendingProgramDaySelection.requestText,
+          option,
+        ),
+      });
+
+      setTrainingPlan(result.trainingPlan);
+      setTrainingPlanId(result.trainingPlanId);
+      setMessages((current) => [
+        ...current.filter((message) => message.kind !== "result"),
+        {
+          id: `assistant-selected-result-${Date.now()}`,
+          role: "assistant",
+          text: "I updated the selected training day. Review the revised plan below.",
+        },
+        {
+          id: `result-${Date.now()}`,
+          role: "assistant",
+          text: "",
+          kind: "result",
+        },
+      ]);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to update the selected day");
     } finally {
       setLoadingAction(null);
     }
@@ -1232,6 +1396,8 @@ export default function AiWorkspaceScreen() {
                     setSelectedMode(null);
                     setExtraContext("");
                     setMessages([]);
+                    setSelectedProgramDay(null);
+                    setPendingProgramDaySelection(null);
                     resetGeneratedState();
                   }}
                 >
@@ -1253,6 +1419,8 @@ export default function AiWorkspaceScreen() {
                     setSelectedMode(null);
                     setExtraContext("");
                     setMessages([]);
+                    setSelectedProgramDay(null);
+                    setPendingProgramDaySelection(null);
                     setError(null);
                     setParsedWorkout(null);
                     setParsedCollection(null);
@@ -1269,7 +1437,7 @@ export default function AiWorkspaceScreen() {
               </View>
               <Text style={styles.sourcePreviewText}>
                 {trainingPlanContext
-                  ? `I’ll use ${trainingPlanContext.title} as the working program so I can refine it or extend it with you.`
+                  ? `I’ll use ${trainingPlanContext.title} as the working program so I can refine it or extend it with you.${selectedProgramDay ? ` Current focus: ${selectedProgramDay.label}.` : ""}`
                   : "I’ll use your onboarding answers as the base context for the plan."}
               </Text>
             </View>
@@ -1300,6 +1468,21 @@ export default function AiWorkspaceScreen() {
                   )}
                 </View>
               ))}
+              {pendingProgramDaySelection ? (
+                <View style={styles.selectionPromptCard}>
+                  {pendingProgramDaySelection.options.map((option) => (
+                    <Pressable
+                      key={option.id}
+                      style={({ pressed }) => [styles.selectionPromptOption, pressed && styles.pressed]}
+                      onPress={() => {
+                        void handleSelectProgramDay(option);
+                      }}
+                    >
+                      <Text style={styles.selectionPromptOptionText}>{option.label}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
               {!messages.length ? inlineResult : null}
             </View>
           ) : null}
@@ -1314,7 +1497,11 @@ export default function AiWorkspaceScreen() {
 
         {showConversation ? (
           <View style={styles.composerShell}>
-            {selectedScheduleExerciseIndices.length > 0 ? (
+            {pendingProgramDaySelection ? (
+              <View style={styles.selectionWaitingBar}>
+                <Text style={styles.selectionWaitingText}>Choose a training day above to continue.</Text>
+              </View>
+            ) : selectedScheduleExerciseIndices.length > 0 ? (
               <View style={styles.selectionModeBar}>
                 <Pressable
                   style={({ pressed }) => [styles.selectionModeCancel, pressed && styles.pressed]}
@@ -3199,29 +3386,38 @@ const styles = StyleSheet.create({
   },
   exerciseDetailOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(252, 248, 247, 0.96)",
+    backgroundColor: "rgba(10, 12, 16, 0.24)",
+    justifyContent: "flex-end",
+    zIndex: 200,
+    elevation: 20,
   },
   exerciseDetailShell: {
-    flex: 1,
+    maxHeight: "88%",
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    backgroundColor: "#f8f8f6",
+    borderWidth: 1,
+    borderColor: "#e6e3db",
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 14,
+    paddingTop: 14,
+    paddingBottom: 26,
     gap: 12,
+    zIndex: 201,
+    elevation: 21,
   },
   exerciseDetailHeader: {
-    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     gap: 12,
   },
   exerciseDetailBack: {
-    minWidth: 42,
-    height: 42,
+    width: 38,
+    height: 38,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: "#d9dbdf",
-    backgroundColor: "#f3f4f6",
+    borderColor: "#d8dbe0",
+    backgroundColor: "#f2f3f5",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -3240,15 +3436,16 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontFamily: Fonts.serif,
     ...Typography.sectionTitle,
-    color: "#151920",
+    color: "#11141a",
     fontWeight: "700",
   },
   exerciseDetailHeaderSpacer: {
-    width: 42,
-    height: 42,
+    width: 38,
+    height: 38,
   },
   exerciseDetailContent: {
-    paddingBottom: 24,
+    paddingTop: 16,
+    paddingBottom: 18,
   },
   errorCard: {
     borderRadius: 14,
@@ -3256,6 +3453,23 @@ const styles = StyleSheet.create({
     borderColor: "#e4b4ac",
     backgroundColor: "#fff4f1",
     padding: 12,
+  },
+  selectionPromptCard: {
+    gap: 8,
+  },
+  selectionPromptOption: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#eadfe3",
+    backgroundColor: "#fffdfc",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  selectionPromptOptionText: {
+    fontFamily: Fonts.sans,
+    ...Typography.body,
+    color: "#282430",
+    fontWeight: "600",
   },
   errorText: {
     fontFamily: Fonts.sans,
@@ -3314,6 +3528,22 @@ const styles = StyleSheet.create({
     ...Typography.button,
     color: "#f5f7fa",
     fontWeight: "700",
+  },
+  selectionWaitingBar: {
+    minHeight: 50,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#e7dde1",
+    backgroundColor: "#fffaf8",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+  selectionWaitingText: {
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#7b6670",
+    fontWeight: "600",
   },
   composerAccessory: {
     width: 34,

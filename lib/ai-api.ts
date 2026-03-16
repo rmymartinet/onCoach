@@ -1,9 +1,12 @@
 import type {
   AiWorkspaceClarificationDecision,
+  DayExecutionStatus,
+  ExerciseExecutionStatus,
   NextTrainingDayDraft,
   NoteImportSegmentation,
   ParsedWorkoutCollection,
   RecommendationDraft,
+  SaveTrainingDayCompletionPayload,
   TrainingPlanDraft,
 } from "@/lib/ai-types";
 
@@ -59,6 +62,14 @@ export type AiContextTrainingPlanExercise = {
   muscleGroups?: string[];
   equipment?: string[];
   substitutions?: string[];
+  completionStatus?: ExerciseExecutionStatus | null;
+  completedSets?: number | null;
+  completedRepMin?: number | null;
+  completedRepMax?: number | null;
+  completedWeight?: number | null;
+  completedUnit?: string | null;
+  completedRestSeconds?: number | null;
+  completionNotes?: string | null;
 };
 
 export type AiContextTrainingPlanDay = {
@@ -68,6 +79,9 @@ export type AiContextTrainingPlanDay = {
   title: string;
   summary?: string | null;
   estimatedDurationMinutes?: number | null;
+  completionStatus?: DayExecutionStatus | null;
+  completedAt?: string | null;
+  completionNotes?: string | null;
   exercises: AiContextTrainingPlanExercise[];
 };
 
@@ -252,6 +266,15 @@ export function updateTrainingPlan(payload: {
   }>("/api/update-training-plan", payload);
 }
 
+export function createTrainingPlan(payload: {
+  trainingPlan: TrainingPlanDraft;
+}) {
+  return postJson<{
+    ok: true;
+    trainingPlanId: string;
+  }>("/api/update-training-plan", payload);
+}
+
 export function generateNextTrainingDay(payload: {
   trainingPlan: unknown;
   userProfile?: unknown;
@@ -308,6 +331,12 @@ export function deleteWorkoutExercise(exerciseId: string) {
   );
 }
 
+export function deleteTrainingPlan(trainingPlanId: string) {
+  return postJson<{ ok: true; trainingPlanId: string }>("/api/delete-training-plan", {
+    trainingPlanId,
+  });
+}
+
 export function getWorkout(workoutId: string) {
   return postJson<{
     ok: true;
@@ -330,6 +359,14 @@ export function appendTrainingPlanDay(payload: {
     ok: true;
     trainingPlanId: string;
   }>("/api/append-training-plan-day", payload);
+}
+
+export function saveTrainingDayCompletion(payload: SaveTrainingDayCompletionPayload) {
+  return postJson<{
+    ok: true;
+    trainingPlanId: string;
+    dayId: string;
+  }>("/api/save-training-day-completion", payload);
 }
 
 export function updateWorkoutExercise(payload: {

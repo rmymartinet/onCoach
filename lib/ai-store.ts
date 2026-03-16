@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { prisma } from "@/lib/prisma";
 import type {
+  SaveTrainingDayCompletionPayload,
   NextTrainingDayDraft,
   NoteImportSegmentation,
   NoteWorkoutCandidate,
@@ -400,6 +401,121 @@ export async function updateTrainingPlanRecord(params: {
       },
     },
   });
+}
+
+export async function deleteTrainingPlanRecord(params: {
+  userId: string;
+  trainingPlanId: string;
+}) {
+  const { userId, trainingPlanId } = params;
+
+  const existingPlan = await prisma.trainingPlan.findFirst({
+    where: {
+      id: trainingPlanId,
+      userId,
+    },
+    select: { id: true },
+  });
+
+  if (!existingPlan) {
+    throw new Error("Training plan not found");
+  }
+
+  await prisma.trainingPlan.delete({
+    where: { id: trainingPlanId },
+  });
+
+  return { trainingPlanId };
+}
+
+export async function saveTrainingDayCompletionRecord(params: {
+  userId: string;
+  trainingPlanId: string;
+  completion: SaveTrainingDayCompletionPayload["completion"];
+}) {
+  const { userId, trainingPlanId, completion } = params;
+
+  const day = await prisma.trainingDay.findFirst({
+    where: {
+      id: completion.dayId,
+      week: {
+        planId: trainingPlanId,
+        plan: {
+          userId,
+        },
+      },
+    },
+    include: {
+      exercises: {
+        orderBy: { order: "asc" },
+      },
+    },
+  });
+
+  if (!day) {
+    throw new Error("Training day not found");
+  }
+
+  const completionRecord = await prisma.trainingDayCompletion.upsert({
+    where: { dayId: completion.dayId },
+    update: {
+      status: completion.status,
+      completedAt: completion.completedAt ? new Date(completion.completedAt) : new Date(),
+      notes: completion.notes?.trim() || null,
+      updatedAt: new Date(),
+    },
+    create: {
+      userId,
+      planId: trainingPlanId,
+      dayId: completion.dayId,
+      status: completion.status,
+      completedAt: completion.completedAt ? new Date(completion.completedAt) : new Date(),
+      notes: completion.notes?.trim() || null,
+    },
+    select: { id: true, dayId: true },
+  });
+
+  const exerciseMap = new Map(day.exercises.map((exercise) => [exercise.id, exercise]));
+  for (const exerciseCompletion of completion.exercises) {
+    const plannedExercise = exerciseMap.get(exerciseCompletion.plannedExerciseId);
+    if (!plannedExercise) continue;
+
+    await prisma.trainingDayExerciseCompletion.upsert({
+      where: {
+        plannedExerciseId: plannedExercise.id,
+      },
+      update: {
+        completionId: completionRecord.id,
+        order: exerciseCompletion.order,
+        name: exerciseCompletion.name,
+        status: exerciseCompletion.status,
+        completedSets: exerciseCompletion.completedSets ?? null,
+        completedRepMin: exerciseCompletion.completedRepMin ?? null,
+        completedRepMax: exerciseCompletion.completedRepMax ?? null,
+        completedWeight: exerciseCompletion.completedWeight ?? null,
+        completedUnit: exerciseCompletion.completedUnit ?? null,
+        completedRestSeconds: exerciseCompletion.completedRestSeconds ?? null,
+        notes: exerciseCompletion.notes?.trim() || null,
+        updatedAt: new Date(),
+      },
+      create: {
+        completionId: completionRecord.id,
+        plannedExerciseId: plannedExercise.id,
+        order: exerciseCompletion.order,
+        name: exerciseCompletion.name,
+        status: exerciseCompletion.status,
+        completedSets: exerciseCompletion.completedSets ?? null,
+        completedRepMin: exerciseCompletion.completedRepMin ?? null,
+        completedRepMax: exerciseCompletion.completedRepMax ?? null,
+        completedWeight: exerciseCompletion.completedWeight ?? null,
+        completedUnit: exerciseCompletion.completedUnit ?? null,
+        completedRestSeconds: exerciseCompletion.completedRestSeconds ?? null,
+        notes: exerciseCompletion.notes?.trim() || null,
+      },
+    });
+  }
+
+  return { trainingPlanId, dayId: completionRecord.dayId };
 }
 
 export async function appendTrainingDayToPlan(params: {

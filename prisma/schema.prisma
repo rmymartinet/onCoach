@@ -47,6 +47,7 @@ model User {
   noteImports      NoteImport[]
   readinessChecks  ReadinessCheck[]
   trainingPlans    TrainingPlan[]
+  trainingDayCompletions TrainingDayCompletion[]
 }
 
 model Session {
@@ -277,6 +278,7 @@ model TrainingPlan {
   user             User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   weeks            TrainingWeek[]
   threads          PlanThread[]
+  completions      TrainingDayCompletion[]
 
   @@index([userId, createdAt])
 }
@@ -308,6 +310,7 @@ model TrainingDay {
   week                     TrainingWeek         @relation(fields: [weekId], references: [id], onDelete: Cascade)
   exercises                TrainingDayExercise[]
   threads                  PlanThread[]
+  completion               TrainingDayCompletion?
 
   @@index([weekId, order])
 }
@@ -331,8 +334,50 @@ model TrainingDayExercise {
   equipment      Json?
   substitutions  Json?
   day            TrainingDay @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  completion     TrainingDayExerciseCompletion?
 
   @@index([dayId, order])
+}
+
+model TrainingDayCompletion {
+  id          String                @id @default(cuid())
+  userId      String
+  planId      String
+  dayId       String                @unique
+  status      DayExecutionStatus    @default(PLANNED)
+  completedAt DateTime?
+  notes       String?
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  user        User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan        TrainingPlan          @relation(fields: [planId], references: [id], onDelete: Cascade)
+  day         TrainingDay           @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  exercises   TrainingDayExerciseCompletion[]
+
+  @@index([userId, updatedAt])
+  @@index([planId, updatedAt])
+}
+
+model TrainingDayExerciseCompletion {
+  id                 String                  @id @default(cuid())
+  completionId       String
+  plannedExerciseId  String                  @unique
+  order              Int
+  name               String
+  status             ExerciseExecutionStatus @default(PLANNED)
+  completedSets      Int?
+  completedRepMin    Int?
+  completedRepMax    Int?
+  completedWeight    Float?
+  completedUnit      String?
+  completedRestSeconds Int?
+  notes              String?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  completion         TrainingDayCompletion   @relation(fields: [completionId], references: [id], onDelete: Cascade)
+  plannedExercise    TrainingDayExercise     @relation(fields: [plannedExerciseId], references: [id], onDelete: Cascade)
+
+  @@index([completionId, order])
 }
 
 model PlanThread {
@@ -428,6 +473,21 @@ enum PlanActionType {
   REGENERATE_DAY
   REGENERATE_WEEK
   REGENERATE_PLAN
+}
+
+enum DayExecutionStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  ADJUSTED
+  SKIPPED
+}
+
+enum ExerciseExecutionStatus {
+  PLANNED
+  DONE
+  ADJUSTED
+  SKIPPED
 }
 
 enum NoteImportStatus {

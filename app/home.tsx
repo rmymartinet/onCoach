@@ -44,20 +44,6 @@ type HomeWorkout = {
   exercises: HomeWorkoutExercise[];
 };
 
-type HomeRecommendation = {
-  id: string;
-  title: string;
-  goal?: string | null;
-  coachSummary?: string | null;
-  explanation?: string | null;
-  estimatedDurationMinutes?: number | null;
-  exercises: {
-    name: string;
-    muscleGroups?: string[];
-    equipment?: string[];
-  }[];
-} | null;
-
 type DayWorkout = {
   workoutId: string;
   id: string;
@@ -85,6 +71,30 @@ type HomeTrainingPlanRow = {
   summary: string;
   meta: string;
   updatedLabel: string;
+};
+
+type AdherenceSummary = {
+  hasData: boolean;
+  completionRate: number;
+  completedExercises: number;
+  adjustedExercises: number;
+  skippedExercises: number;
+  completedDays: number;
+  trackedDays: number;
+  insight: string;
+};
+
+type CurrentSessionCard = {
+  trainingPlanId: string;
+  weekId: string;
+  dayId: string;
+  programTitle: string;
+  dayTitle: string;
+  dayLabel: string;
+  weekLabel: string;
+  exerciseCount: number;
+  durationLabel: string;
+  stateLabel: string;
 };
 
 function buildTrendTop(value: number) {
@@ -229,6 +239,88 @@ function buildTrainingPlanRows(trainingPlans: AiContextTrainingPlan[]): HomeTrai
       updatedLabel: formatDayLabel(plan.updatedAt),
     };
   });
+}
+
+function buildAdherenceSummary(trainingPlans: AiContextTrainingPlan[]): AdherenceSummary {
+  let completedExercises = 0;
+  let adjustedExercises = 0;
+  let skippedExercises = 0;
+  let trackedDays = 0;
+  let completedDays = 0;
+
+  for (const plan of trainingPlans) {
+    for (const week of plan.weeks) {
+      for (const day of week.days) {
+        if (day.completionStatus && day.completionStatus !== "PLANNED") {
+          trackedDays += 1;
+          if (day.completionStatus === "COMPLETED" || day.completionStatus === "ADJUSTED") {
+            completedDays += 1;
+          }
+        }
+
+        for (const exercise of day.exercises) {
+          if (exercise.completionStatus === "DONE") completedExercises += 1;
+          if (exercise.completionStatus === "ADJUSTED") adjustedExercises += 1;
+          if (exercise.completionStatus === "SKIPPED") skippedExercises += 1;
+        }
+      }
+    }
+  }
+
+  const totalTrackedExercises = completedExercises + adjustedExercises + skippedExercises;
+  const completionRate = totalTrackedExercises
+    ? Math.round(((completedExercises + adjustedExercises) / totalTrackedExercises) * 100)
+    : 0;
+
+  let insight = "Complete a training day to start tracking adherence.";
+  if (totalTrackedExercises > 0) {
+    if (skippedExercises > adjustedExercises && skippedExercises > completedExercises / 2) {
+      insight = "You are skipping more work than expected. The coach should probably simplify the plan.";
+    } else if (adjustedExercises > completedExercises) {
+      insight = "You are finishing sessions, but with frequent changes. That is useful coaching data.";
+    } else {
+      insight = "Your execution is broadly aligned with the plan so far.";
+    }
+  }
+
+  return {
+    hasData: totalTrackedExercises > 0 || trackedDays > 0,
+    completionRate,
+    completedExercises,
+    adjustedExercises,
+    skippedExercises,
+    completedDays,
+    trackedDays,
+    insight,
+  };
+}
+
+function buildCurrentSession(trainingPlans: AiContextTrainingPlan[]): CurrentSessionCard | null {
+  for (const plan of trainingPlans) {
+    for (const week of plan.weeks) {
+      for (const day of week.days) {
+        const status = day.completionStatus ?? "PLANNED";
+        if (status === "COMPLETED" || status === "SKIPPED") {
+          continue;
+        }
+
+        return {
+          trainingPlanId: plan.id,
+          weekId: week.id,
+          dayId: day.id,
+          programTitle: plan.title,
+          dayTitle: day.title,
+          dayLabel: day.dayLabel,
+          weekLabel: `Week ${week.weekNumber}`,
+          exerciseCount: day.exercises.length,
+          durationLabel: day.estimatedDurationMinutes ? `${day.estimatedDurationMinutes} min` : "Flexible",
+          stateLabel: status === "IN_PROGRESS" ? "Resume session" : "Start session",
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 function buildWeekDays(workouts: HomeWorkout[]) {
@@ -494,7 +586,6 @@ export default function HomeScreen() {
   const [splitPreference, setSplitPreference] = useState<string | null>(null);
   const [recentWorkouts, setRecentWorkouts] = useState<HomeWorkout[]>([]);
   const [trainingPlans, setTrainingPlans] = useState<AiContextTrainingPlan[]>([]);
-  const [latestRecommendation, setLatestRecommendation] = useState<HomeRecommendation>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -512,7 +603,6 @@ export default function HomeScreen() {
           setSplitPreference(result.user?.splitPreference ?? null);
           setRecentWorkouts(result.recentWorkouts as HomeWorkout[]);
           setTrainingPlans((result.trainingPlans as AiContextTrainingPlan[]) ?? []);
-          setLatestRecommendation((result.latestRecommendation as HomeRecommendation) ?? null);
           setError(null);
         } catch (nextError) {
           if (!cancelled) {
@@ -538,6 +628,8 @@ export default function HomeScreen() {
   const trendData = useMemo(() => buildTrendSeries(recentWorkouts), [recentWorkouts]);
   const programRows = useMemo(() => buildProgramRows(recentWorkouts), [recentWorkouts]);
   const trainingPlanRows = useMemo(() => buildTrainingPlanRows(trainingPlans), [trainingPlans]);
+  const adherenceSummary = useMemo(() => buildAdherenceSummary(trainingPlans), [trainingPlans]);
+  const currentSession = useMemo(() => buildCurrentSession(trainingPlans), [trainingPlans]);
   const recentSessionRows = recentWorkouts.slice(0, 2);
   const todayName = new Date().toLocaleDateString("en-US", { weekday: "long" });
 
@@ -563,14 +655,163 @@ export default function HomeScreen() {
             </View>
           ) : (
             <>
-              <VolumeTrendCard
-                hasData={trendData.hasData}
-                currentNormalized={trendData.currentNormalized}
-                previousNormalized={trendData.previousNormalized}
-                currentRaw={trendData.currentRaw}
-                previousRaw={trendData.previousRaw}
-                onPress={() => router.push("/stats-detail")}
-              />
+              {trendData.hasData ? (
+                <VolumeTrendCard
+                  hasData={trendData.hasData}
+                  currentNormalized={trendData.currentNormalized}
+                  previousNormalized={trendData.previousNormalized}
+                  currentRaw={trendData.currentRaw}
+                  previousRaw={trendData.previousRaw}
+                  onPress={() => router.push("/stats-detail")}
+                />
+              ) : null}
+
+              <View style={styles.programsBlock}>
+                <View style={styles.programsHeader}>
+                  <Text style={styles.programsTitle}>MY PROGRAMS</Text>
+                  {splitPreference ? (
+                    <View style={styles.programsChip}>
+                      <Text style={styles.programsChipText}>{splitPreference.replaceAll("_", " ")}</Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                {trainingPlanRows.length ? (
+                  <View style={styles.programsList}>
+                    {trainingPlanRows.slice(0, 6).map((program) => (
+                      <Pressable
+                        key={program.key}
+                        style={({ pressed }) => [styles.programRow, pressed && styles.pressed]}
+                        onPress={() =>
+                          router.push({
+                            pathname: "/program-detail",
+                            params: {
+                              trainingPlanId: program.id,
+                              title: program.title,
+                            },
+                          })
+                        }
+                      >
+                        <View style={styles.programRowMain}>
+                          <Text style={styles.programRowTitle}>{program.title}</Text>
+                          <Text style={styles.programRowMeta}>{program.meta}</Text>
+                        </View>
+                        <View style={styles.programRowAside}>
+                          <Text style={styles.programRowDate}>{program.updatedLabel}</Text>
+                          <MaterialCommunityIcons name="chevron-right" size={20} color="#8a9098" />
+                        </View>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : programRows.length ? (
+                  <View style={styles.programsList}>
+                    {programRows.slice(0, 6).map((program) => (
+                      <Pressable
+                        key={program.key}
+                        style={({ pressed }) => [styles.programRow, pressed && styles.pressed]}
+                        onPress={() =>
+                          router.push({
+                            pathname: "/workout-detail",
+                            params: {
+                              workoutId: program.latestWorkout.id,
+                              title: program.latestWorkout.title,
+                              meta: formatWorkoutMeta(program.latestWorkout),
+                              time: formatTimeLabel(program.latestWorkout.performedAt ?? program.latestWorkout.createdAt),
+                              day: formatDayLabel(program.latestWorkout.performedAt ?? program.latestWorkout.createdAt),
+                              exercises: JSON.stringify(program.latestWorkout.exercises),
+                            },
+                          })
+                        }
+                      >
+                        <View style={styles.programRowMain}>
+                          <Text style={styles.programRowTitle}>{program.title}</Text>
+                          <Text style={styles.programRowMeta}>
+                            {program.focusLabel} · {program.sessionsCount} sessions · {program.totalSets} sets
+                          </Text>
+                        </View>
+                        <View style={styles.programRowAside}>
+                          <Text style={styles.programRowDate}>{program.lastPerformedLabel}</Text>
+                          <MaterialCommunityIcons name="chevron-right" size={20} color="#8a9098" />
+                        </View>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : (
+                  <Text style={styles.dayEmptyText}>No programs yet. Save workouts to build your program list.</Text>
+                )}
+              </View>
+
+              {currentSession ? (
+                <View style={styles.currentSessionBlock}>
+                  <Text style={styles.sessionsTitle}>CURRENT SESSION</Text>
+                  <Pressable
+                    style={({ pressed }) => [styles.currentSessionCard, pressed && styles.pressed]}
+                    onPress={() =>
+                      router.push({
+                        pathname: "/program-detail",
+                        params: {
+                          trainingPlanId: currentSession.trainingPlanId,
+                          title: currentSession.programTitle,
+                          focusWeekId: currentSession.weekId,
+                          focusDayId: currentSession.dayId,
+                        },
+                      })
+                    }
+                  >
+                    <View style={styles.currentSessionTop}>
+                      <View>
+                        <Text style={styles.currentSessionEyebrow}>{currentSession.weekLabel}</Text>
+                        <Text style={styles.currentSessionTitle}>{currentSession.dayLabel} · {currentSession.dayTitle}</Text>
+                        <Text style={styles.currentSessionMeta}>
+                          {currentSession.exerciseCount} exercises · {currentSession.durationLabel}
+                        </Text>
+                      </View>
+                      <View style={styles.currentSessionBadge}>
+                        <Text style={styles.currentSessionBadgeText}>{currentSession.stateLabel}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.currentSessionProgram}>{currentSession.programTitle}</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {adherenceSummary.hasData ? (
+                <View style={styles.executionBlock}>
+                  <Text style={styles.sessionsTitle}>EXECUTION</Text>
+                  <View style={styles.executionCard}>
+                    <View style={styles.executionTopRow}>
+                      <View>
+                        <Text style={styles.executionLabel}>Adherence rate</Text>
+                        <Text style={styles.executionRate}>{adherenceSummary.completionRate}%</Text>
+                      </View>
+                      <View style={styles.executionMiniGrid}>
+                        <View style={styles.executionMiniStat}>
+                          <Text style={styles.executionMiniValue}>{adherenceSummary.completedDays}</Text>
+                          <Text style={styles.executionMiniLabel}>days done</Text>
+                        </View>
+                        <View style={styles.executionMiniStat}>
+                          <Text style={styles.executionMiniValue}>{adherenceSummary.skippedExercises}</Text>
+                          <Text style={styles.executionMiniLabel}>skipped</Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.executionChips}>
+                      <View style={styles.executionChipDone}>
+                        <Text style={styles.executionChipTextDone}>{adherenceSummary.completedExercises} done</Text>
+                      </View>
+                      <View style={styles.executionChipAdjusted}>
+                        <Text style={styles.executionChipTextAdjusted}>{adherenceSummary.adjustedExercises} adjusted</Text>
+                      </View>
+                      <View style={styles.executionChipSkipped}>
+                        <Text style={styles.executionChipTextSkipped}>{adherenceSummary.skippedExercises} skipped</Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.executionInsight}>{adherenceSummary.insight}</Text>
+                  </View>
+                </View>
+              ) : null}
 
               <View style={styles.dayPickerBlock}>
                 <Text style={styles.dayPickerLabel}>THIS WEEK</Text>
@@ -672,139 +913,6 @@ export default function HomeScreen() {
                     </Text>
                   )}
                 </View>
-              </View>
-
-              <View style={styles.recoCard}>
-                <View style={styles.recoHeader}>
-                  <View>
-                    <Text style={styles.recoLabel}>RECOMMENDED NEXT</Text>
-                    <Text style={styles.recoTitle}>{latestRecommendation?.title ?? "No recommendation yet"}</Text>
-                  </View>
-                  <View style={styles.recoBadge}>
-                    <Text style={styles.recoBadgeText}>{latestRecommendation ? "Ready" : "Waiting"}</Text>
-                  </View>
-                </View>
-
-                <Text style={styles.recoBody}>
-                  {latestRecommendation?.coachSummary ??
-                    latestRecommendation?.explanation ??
-                    "Generate or save a workout to unlock your next recommendation."}
-                </Text>
-
-                <View style={styles.recoMetaRow}>
-                  {latestRecommendation?.goal ? (
-                    <View style={styles.recoMetaChip}>
-                      <Text style={styles.recoMetaText}>{latestRecommendation.goal.replaceAll("_", " ")}</Text>
-                    </View>
-                  ) : null}
-                  {latestRecommendation?.estimatedDurationMinutes ? (
-                    <View style={[styles.recoMetaChip, styles.recoMetaChipSoft]}>
-                      <Text style={styles.recoMetaText}>{latestRecommendation.estimatedDurationMinutes} min</Text>
-                    </View>
-                  ) : null}
-                  {latestRecommendation?.exercises[0]?.equipment?.length ? (
-                    <View style={[styles.recoMetaChip, styles.recoMetaChipSoft]}>
-                      <Text style={styles.recoMetaText}>
-                        {latestRecommendation.exercises[0].equipment.slice(0, 2).join(" + ")}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-
-                <Pressable
-                  style={({ pressed }) => [styles.recoActionRow, pressed && styles.pressed]}
-                  onPress={() => router.push("/ai-workspace")}
-                >
-                  <View style={styles.recoActionMain}>
-                    <Text style={styles.recoActionTitle}>
-                      {latestRecommendation ? "Open this recommendation" : "Generate your first recommendation"}
-                    </Text>
-                    <Text style={styles.recoActionBody}>
-                      {latestRecommendation
-                        ? "Open the guided flow and refine today’s session."
-                        : "Go to the workout flow and build a first recommendation with AI."}
-                    </Text>
-                  </View>
-                  <View style={styles.recoActionAside}>
-                    <MaterialCommunityIcons name="chevron-right" size={22} color="#8a9098" />
-                  </View>
-                </Pressable>
-              </View>
-
-              <View style={styles.programsBlock}>
-                <View style={styles.programsHeader}>
-                  <Text style={styles.programsTitle}>MY PROGRAMS</Text>
-                  {splitPreference ? (
-                    <View style={styles.programsChip}>
-                      <Text style={styles.programsChipText}>{splitPreference.replaceAll("_", " ")}</Text>
-                    </View>
-                  ) : null}
-                </View>
-
-                {trainingPlanRows.length ? (
-                  <View style={styles.programsList}>
-                    {trainingPlanRows.slice(0, 6).map((program) => (
-                      <Pressable
-                        key={program.key}
-                        style={({ pressed }) => [styles.programRow, pressed && styles.pressed]}
-                        onPress={() =>
-                          router.push({
-                            pathname: "/program-detail",
-                            params: {
-                              trainingPlanId: program.id,
-                              title: program.title,
-                            },
-                          })
-                        }
-                      >
-                        <View style={styles.programRowMain}>
-                          <Text style={styles.programRowTitle}>{program.title}</Text>
-                          <Text style={styles.programRowMeta}>{program.summary}</Text>
-                          <Text style={styles.programRowMeta}>{program.meta}</Text>
-                        </View>
-                        <View style={styles.programRowAside}>
-                          <Text style={styles.programRowDate}>{program.updatedLabel}</Text>
-                          <MaterialCommunityIcons name="chevron-right" size={20} color="#8a9098" />
-                        </View>
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : programRows.length ? (
-                  <View style={styles.programsList}>
-                    {programRows.slice(0, 6).map((program) => (
-                      <Pressable
-                        key={program.key}
-                        style={({ pressed }) => [styles.programRow, pressed && styles.pressed]}
-                        onPress={() =>
-                          router.push({
-                              pathname: "/workout-detail",
-                              params: {
-                                workoutId: program.latestWorkout.id,
-                                title: program.latestWorkout.title,
-                              meta: formatWorkoutMeta(program.latestWorkout),
-                              time: formatTimeLabel(program.latestWorkout.performedAt ?? program.latestWorkout.createdAt),
-                              day: formatDayLabel(program.latestWorkout.performedAt ?? program.latestWorkout.createdAt),
-                              exercises: JSON.stringify(program.latestWorkout.exercises),
-                            },
-                          })
-                        }
-                      >
-                        <View style={styles.programRowMain}>
-                          <Text style={styles.programRowTitle}>{program.title}</Text>
-                          <Text style={styles.programRowMeta}>
-                            {program.focusLabel} · {program.sessionsCount} sessions · {program.totalSets} sets
-                          </Text>
-                        </View>
-                        <View style={styles.programRowAside}>
-                          <Text style={styles.programRowDate}>{program.lastPerformedLabel}</Text>
-                          <MaterialCommunityIcons name="chevron-right" size={20} color="#8a9098" />
-                        </View>
-                      </Pressable>
-                    ))}
-                  </View>
-                ) : (
-                  <Text style={styles.dayEmptyText}>No programs yet. Save workouts to build your program list.</Text>
-                )}
               </View>
 
               <View style={styles.sessionsBlock}>
@@ -1336,103 +1444,6 @@ const styles = StyleSheet.create({
     ...Typography.bodySmall,
     color: "#8b9097",
   },
-  recoCard: {
-    marginTop: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "#d8d9dd",
-    backgroundColor: "#f7f6f4",
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 12,
-  },
-  recoHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    gap: 10,
-  },
-  recoLabel: {
-    fontFamily: Fonts.sans,
-    ...Typography.caption,
-    color: "#98a0aa",
-    letterSpacing: 0.8,
-  },
-  recoTitle: {
-    marginTop: 4,
-    fontFamily: Fonts.serif,
-    ...Typography.title,
-    color: "#171a21",
-    fontWeight: "700",
-  },
-  recoBadge: {
-    borderRadius: 999,
-    backgroundColor: "#eef8ef",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  recoBadgeText: {
-    fontFamily: Fonts.sans,
-    ...Typography.caption,
-    color: "#257448",
-    fontWeight: "700",
-  },
-  recoBody: {
-    fontFamily: Fonts.sans,
-    ...Typography.body,
-    color: "#69707a",
-    lineHeight: 22,
-  },
-  recoMetaRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  recoMetaChip: {
-    borderRadius: 999,
-    backgroundColor: "#ece8df",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  recoMetaChipSoft: {
-    backgroundColor: "#efefef",
-  },
-  recoMetaText: {
-    fontFamily: Fonts.sans,
-    ...Typography.caption,
-    color: "#3f454e",
-    fontWeight: "600",
-  },
-  recoActionRow: {
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#dddedf",
-    backgroundColor: "#ffffff",
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-  },
-  recoActionMain: {
-    flex: 1,
-    gap: 4,
-  },
-  recoActionTitle: {
-    fontFamily: Fonts.sans,
-    ...Typography.body,
-    color: "#171b22",
-    fontWeight: "700",
-  },
-  recoActionBody: {
-    fontFamily: Fonts.sans,
-    ...Typography.bodySmall,
-    color: "#8b9097",
-  },
-  recoActionAside: {
-    paddingLeft: 6,
-  },
   programsBlock: {
     marginTop: 16,
     borderRadius: 18,
@@ -1442,6 +1453,165 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     gap: 10,
+  },
+  currentSessionBlock: {
+    marginTop: 16,
+  },
+  currentSessionCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#d9dbe0",
+    backgroundColor: "#0f1218",
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 10,
+  },
+  currentSessionTop: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  currentSessionEyebrow: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#949aa3",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  currentSessionTitle: {
+    marginTop: 3,
+    fontFamily: Fonts.sans,
+    ...Typography.title,
+    color: "#f4f6f8",
+    fontWeight: "700",
+  },
+  currentSessionMeta: {
+    marginTop: 4,
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#b5bac2",
+  },
+  currentSessionBadge: {
+    borderRadius: 999,
+    backgroundColor: "#eef4ff",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  currentSessionBadgeText: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#325fc4",
+    fontWeight: "700",
+  },
+  currentSessionProgram: {
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#8f96a0",
+  },
+  executionBlock: {
+    marginTop: 16,
+  },
+  executionCard: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#dddddf",
+    backgroundColor: "#f7f6f4",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    gap: 12,
+  },
+  executionTopRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  executionLabel: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#9ea3ac",
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  executionRate: {
+    marginTop: 4,
+    fontFamily: Fonts.serif,
+    ...Typography.title,
+    color: "#171b22",
+    fontWeight: "700",
+  },
+  executionMiniGrid: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  executionMiniStat: {
+    minWidth: 74,
+    borderRadius: 14,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#e5e1d9",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 2,
+  },
+  executionMiniValue: {
+    fontFamily: Fonts.sans,
+    ...Typography.body,
+    color: "#1f242c",
+    fontWeight: "700",
+  },
+  executionMiniLabel: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#8b9198",
+  },
+  executionChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  executionChipDone: {
+    borderRadius: 999,
+    backgroundColor: "#eaf7ee",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  executionChipAdjusted: {
+    borderRadius: 999,
+    backgroundColor: "#eef3ff",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  executionChipSkipped: {
+    borderRadius: 999,
+    backgroundColor: "#fff1ec",
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  executionChipTextDone: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#2f8c57",
+    fontWeight: "700",
+  },
+  executionChipTextAdjusted: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#476cc7",
+    fontWeight: "700",
+  },
+  executionChipTextSkipped: {
+    fontFamily: Fonts.sans,
+    ...Typography.caption,
+    color: "#c26a3a",
+    fontWeight: "700",
+  },
+  executionInsight: {
+    fontFamily: Fonts.sans,
+    ...Typography.bodySmall,
+    color: "#6b717a",
+    lineHeight: 20,
   },
   programsHeader: {
     flexDirection: "row",
@@ -1481,7 +1651,7 @@ const styles = StyleSheet.create({
     borderColor: "#e5e1d9",
     backgroundColor: "#ffffff",
     paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingVertical: 9,
     marginBottom: 8,
   },
   programRowMain: {
@@ -1496,11 +1666,12 @@ const styles = StyleSheet.create({
   },
   programRowMeta: {
     fontFamily: Fonts.sans,
-    ...Typography.bodySmall,
+    ...Typography.caption,
     color: "#7e848d",
   },
   programRowAside: {
     alignItems: "flex-end",
+    justifyContent: "center",
     gap: 4,
   },
   programRowDate: {

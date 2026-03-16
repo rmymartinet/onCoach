@@ -58,8 +58,12 @@ export async function GET(request: Request) {
           days: {
             orderBy: { order: "asc" },
             include: {
+              completion: true,
               exercises: {
                 orderBy: { order: "asc" },
+                include: {
+                  completion: true,
+                },
               },
             },
           },
@@ -135,6 +139,9 @@ export async function GET(request: Request) {
           title: day.title,
           summary: day.summary,
           estimatedDurationMinutes: day.estimatedDurationMinutes,
+          completionStatus: day.completion?.status ?? null,
+          completedAt: day.completion?.completedAt ?? null,
+          completionNotes: day.completion?.notes ?? null,
           exercises: day.exercises.map((exercise) => ({
             id: exercise.id,
             order: exercise.order,
@@ -150,6 +157,14 @@ export async function GET(request: Request) {
             muscleGroups: Array.isArray(exercise.muscleGroups) ? exercise.muscleGroups : [],
             equipment: Array.isArray(exercise.equipment) ? exercise.equipment : [],
             substitutions: Array.isArray(exercise.substitutions) ? exercise.substitutions : [],
+            completionStatus: exercise.completion?.status ?? null,
+            completedSets: exercise.completion?.completedSets ?? null,
+            completedRepMin: exercise.completion?.completedRepMin ?? null,
+            completedRepMax: exercise.completion?.completedRepMax ?? null,
+            completedWeight: exercise.completion?.completedWeight ?? null,
+            completedUnit: exercise.completion?.completedUnit ?? null,
+            completedRestSeconds: exercise.completion?.completedRestSeconds ?? null,
+            completionNotes: exercise.completion?.notes ?? null,
           })),
         })),
       })),

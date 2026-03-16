@@ -77,6 +77,38 @@ export type TrainingPlanDraft = {
   weeks: TrainingPlanWeek[];
 };
 
+export type DayExecutionStatus = "PLANNED" | "IN_PROGRESS" | "COMPLETED" | "ADJUSTED" | "SKIPPED";
+
+export type ExerciseExecutionStatus = "PLANNED" | "DONE" | "ADJUSTED" | "SKIPPED";
+
+export type TrainingDayExerciseCompletionDraft = {
+  plannedExerciseId: string;
+  order: number;
+  name: string;
+  status: ExerciseExecutionStatus;
+  completedSets?: number;
+  completedRepMin?: number;
+  completedRepMax?: number;
+  completedWeight?: number;
+  completedUnit?: string;
+  completedRestSeconds?: number;
+  notes?: string;
+};
+
+export type TrainingDayCompletionDraft = {
+  planId: string;
+  dayId: string;
+  status: DayExecutionStatus;
+  completedAt?: string;
+  notes?: string;
+  exercises: TrainingDayExerciseCompletionDraft[];
+};
+
+export type SaveTrainingDayCompletionPayload = {
+  trainingPlanId: string;
+  completion: TrainingDayCompletionDraft;
+};
+
 export type CoachAction =
   | { type: "none" }
   | { type: "replace_exercise"; targetExercise: string; replacement: RecommendationExerciseDraft }
